@@ -1,0 +1,30 @@
+# Large source data — not needed at runtime (nypa_data.json is pre-computed)
+NYPA_Master_Dataset.csv
+*.csv
+
+# Prebuilt/report HTML
+*.html
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Claude Code local state
+.claude/
