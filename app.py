@@ -1251,7 +1251,14 @@ def view_leaderboard(data: dict):
             "Avg OT": st.column_config.NumberColumn(format="$%d"),
             "Growth %": st.column_config.NumberColumn(format="%.1f%%"),
             "CAGR %": st.column_config.NumberColumn(format="%.1f%%"),
-            "Accel": st.column_config.NumberColumn(format="%.1f"),
+            "Accel": st.column_config.NumberColumn(
+                format="%.1f",
+                help=(
+                    "Difference in average YoY raise % between the second half of the "
+                    "selected range and the first half. Positive = speeding up, "
+                    "negative = slowing down."
+                ),
+            ),
             "Best year %": st.column_config.NumberColumn(format="%.1f%%"),
             "Tier": st.column_config.TextColumn(
                 help=(
