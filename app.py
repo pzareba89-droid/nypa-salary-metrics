@@ -922,6 +922,7 @@ def view_comparison(data: dict):
             "End title": e_title,
             "Start base": m["bs"] if m else None,
             "End base": m["be"] if m else None,
+            "$ Growth": (m["be"] - m["bs"]) if m else None,
             "Growth %": m["tg"] if m else None,
             "CAGR %": m["ca"] if m else None,
             "Avg OT": avg_ot,
@@ -934,6 +935,7 @@ def view_comparison(data: dict):
         column_config={
             "Start base": st.column_config.NumberColumn(format="$%d"),
             "End base": st.column_config.NumberColumn(format="$%d"),
+            "$ Growth": st.column_config.NumberColumn(format="$%d"),
             "Avg OT": st.column_config.NumberColumn(format="$%d"),
             "Growth %": st.column_config.NumberColumn(format="%.1f%%"),
             "CAGR %": st.column_config.NumberColumn(format="%.1f%%"),
