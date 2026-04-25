@@ -1095,7 +1095,9 @@ def view_leaderboard(data: dict):
     with c3:
         metric_card("Best CAGR", c["name"], sub=f"{c['ca']}% / yr", color="amber")
     with c4:
-        metric_card("Rocket tier", f"{rockets}", sub=f"of {len(ranked)} employees", color="purple")
+        metric_card("Rocket tier", f"{rockets}",
+                    sub=f"of {len(ranked)} employees · Rocket = ≥80% growth or ≥12% CAGR",
+                    color="purple")
 
     # Gap analysis
     gap_name = st.selectbox(
@@ -1251,6 +1253,14 @@ def view_leaderboard(data: dict):
             "CAGR %": st.column_config.NumberColumn(format="%.1f%%"),
             "Accel": st.column_config.NumberColumn(format="%.1f"),
             "Best year %": st.column_config.NumberColumn(format="%.1f%%"),
+            "Tier": st.column_config.TextColumn(
+                help=(
+                    "Rocket: ≥80% growth or ≥12% CAGR · "
+                    "Strong: ≥40% growth or ≥7% CAGR · "
+                    "Solid: ≥20% growth · "
+                    "Steady: below"
+                )
+            ),
         },
         height=440,
     )
