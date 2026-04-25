@@ -601,14 +601,17 @@ def view_individual(data: dict):
     # Year-by-year table
     st.markdown("#### Year by year detail")
     rows = []
+    pctiles = rec.get("pctile", [None] * len(rec_years))
     for y in ir:
         i = rec_years.index(y)
+        pct_i = pctiles[i] if i < len(pctiles) else None
         rows.append({
             "Year": y,
             "Title": rec["titles"][i],
             "Group": rec["groups"][i],
             "Base": rec["base"][i],
             "YoY %": rec["yoy"][i],
+            "Percentile": f"{int(pct_i)}%" if pct_i is not None else "—",
             "Overtime": rec["ot"][i],
             "Add. earnings": rec["add"][i],
             "Total comp": rec["total"][i],
@@ -624,6 +627,9 @@ def view_individual(data: dict):
             "Add. earnings": st.column_config.NumberColumn(format="$%d"),
             "Total comp": st.column_config.NumberColumn(format="$%d"),
             "YoY %": st.column_config.NumberColumn(format="%.1f%%"),
+            "Percentile": st.column_config.TextColumn(
+                help="This employee's percentile rank within the full org for that year's base salary.",
+            ),
         },
     )
 
