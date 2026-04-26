@@ -1095,8 +1095,9 @@ def view_leaderboard(data: dict):
     with c3:
         metric_card("Best CAGR", c["name"], sub=f"{c['ca']}% / yr", color="amber")
     with c4:
-        metric_card("Rocket tier", f"{rockets}",
-                    sub=f"of {len(ranked)} employees · Rocket = ≥80% growth or ≥12% CAGR",
+        rocket_pct = round(rockets / len(ranked) * 100) if ranked else 0
+        metric_card("Rocket tier", f"{rockets} ({rocket_pct}%)",
+                    sub=f"of {len(ranked):,} employees · ≥80% growth or ≥12% CAGR",
                     color="purple")
 
     # Gap analysis
