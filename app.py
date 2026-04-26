@@ -626,6 +626,36 @@ def view_individual(data: dict):
         apply_layout(fig, height=260)
         chart_card("Year-over-year change ($ and %)", fig, key="ind-yoy")
 
+        cohort_data = data.get("cohort_raises", {})
+        ctx = None
+        if cohort_data:
+            for y_ctx in reversed(ir):
+                idx_ = rec_years.index(y_ctx)
+                if idx_ > 0 and rec_years[idx_ - 1] == y_ctx - 1 and (y_ctx - 1) in ir:
+                    person_pct = rec["yoy"][idx_]
+                    trans = cohort_data.get(f"{y_ctx - 1}_{y_ctx}")
+                    if person_pct is not None and trans:
+                        ctx = (y_ctx, person_pct, trans["all_cohort"]["mean_pct"])
+                        break
+        if ctx:
+            y_ctx, person_pct, org_pct = ctx
+            diff = person_pct - org_pct
+            if diff > 1:
+                verdict, vc = f"Outperformed by {diff:.1f} points", GREEN
+            elif diff < -1:
+                verdict, vc = f"Underperformed by {abs(diff):.1f} points", "#A32D2D"
+            else:
+                verdict, vc = "Matched the typical raise", "#888"
+            st.markdown(
+                f"<div style='font-size:11px;color:#444;margin-top:-4px;margin-bottom:8px;"
+                f"padding:7px 11px;background:#f5f5f3;border-left:3px solid {vc};border-radius:4px;'>"
+                f"In <strong>{y_ctx}</strong>, this employee got a "
+                f"<strong>{person_pct:+.2f}%</strong> raise vs. org average of "
+                f"<strong>{org_pct:+.2f}%</strong>. <em>{verdict} that year.</em>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
     with col_r:
         st.markdown(
             "<div style='font-size:11px;font-weight:600;color:#888;"
