@@ -856,7 +856,20 @@ def view_comparison(data: dict):
         metric_card("Top grower", top_name,
                     sub=(f"+{top_m['tg']}%" if top_m else ""), color="amber")
 
-    # Absolute base salary chart (full width)
+    # Absolute salary chart (full width) — toggleable between base and total comp
+    cmp_chart1_mode = st.radio(
+        "Show",
+        ["Base salary only", "Total compensation"],
+        horizontal=True,
+        index=0,
+        key="cmp_chart1_mode",
+        help=(
+            "Base salary: career growth metric. "
+            "Total compensation: actual take-home including OT and additional earnings."
+        ),
+    )
+    use_total = cmp_chart1_mode == "Total compensation"
+    series_key = "total" if use_total else "base"
     fig = go.Figure()
     for i, name in enumerate(selected):
         rec = records[name]
@@ -864,7 +877,7 @@ def view_comparison(data: dict):
         st_ = cmp_status(rec, sy, ey)
         if st_["status"] == "absent":
             continue
-        y_data = [rec["base"][rec["years"].index(y)] if y in rec["years"] else None for y in ry]
+        y_data = [rec[series_key][rec["years"].index(y)] if y in rec["years"] else None for y in ry]
         dash = "dash" if st_["status"] != "full" else "solid"
         fig.add_trace(go.Scatter(
             x=ry, y=y_data, mode="lines+markers", name=name,
@@ -874,22 +887,10 @@ def view_comparison(data: dict):
             hovertemplate=f"<b>{name}</b><br>%{{x}}: $%{{y:,.0f}}<extra></extra>",
         ))
     apply_layout(fig, height=320, show_legend=True, y_dollars=True)
-    chart_card("Base salary over time", fig, key="cmp-abs-base")
+    chart1_title = "Total compensation over time" if use_total else "Base salary over time"
+    chart_card(chart1_title, fig, key="cmp-abs-base")
 
-    # Indexed growth chart
-    idx_mode = st.radio(
-        "Display mode",
-        ["Growth Index (start=100)", "Absolute Salary ($)"],
-        horizontal=True,
-        index=0,
-        key="cmp_idx_mode",
-        help=(
-            "Indexed: shows growth speed (each person's start = 100). "
-            "Absolute: shows actual dollar amounts. Index is better for "
-            "comparing growth rates across different starting salaries."
-        ),
-    )
-    show_index = idx_mode == "Growth Index (start=100)"
+    # Indexed growth chart (always indexed, base-salary based)
     col_l, col_r = st.columns(2)
     with col_l:
         fig = go.Figure()
@@ -904,33 +905,25 @@ def view_comparison(data: dict):
             for y in ry:
                 if y in rec["years"]:
                     b = rec["base"][rec["years"].index(y)]
-                    if show_index:
-                        y_data.append(round(b / sb * 1000) / 10 if sb else None)
-                    else:
-                        y_data.append(b)
+                    y_data.append(round(b / sb * 1000) / 10 if sb else None)
                 else:
                     y_data.append(None)
             dash = "dash" if st_["status"] != "full" else "solid"
-            hover = (
-                f"<b>{name}</b><br>%{{x}}: %{{y:.1f}}<extra></extra>" if show_index
-                else f"<b>{name}</b><br>%{{x}}: $%{{y:,.0f}}<extra></extra>"
-            )
             fig.add_trace(go.Scatter(
                 x=ry, y=y_data, mode="lines+markers", name=name,
                 line=dict(color=color, width=2, dash=dash),
                 marker=dict(size=6),
                 connectgaps=False,
-                hovertemplate=hover,
+                hovertemplate=f"<b>{name}</b><br>%{{x}}: %{{y:.1f}}<extra></extra>",
             ))
-        if show_index:
-            fig.update_yaxes(title="Index (start=100)", tickprefix="", tickformat=".0f")
-            apply_layout(fig, height=320, show_legend=True, y_dollars=False)
-            chart_title = "Indexed growth — start=100"
-        else:
-            apply_layout(fig, height=320, show_legend=True, y_dollars=True)
-            fig.update_yaxes(title="Base salary ($)")
-            chart_title = "Absolute salary"
-        chart_card(chart_title, fig, key="cmp-norm")
+        fig.update_yaxes(title="Index (start=100)", tickprefix="", tickformat=".0f")
+        apply_layout(fig, height=320, show_legend=True, y_dollars=False)
+        chart_card(
+            "Indexed growth — start=100",
+            fig,
+            key="cmp-norm",
+            subtitle="All base salaries normalized to 100 in starting year. For absolute amounts, see chart above.",
+        )
 
     with col_r:
         fig = go.Figure()
