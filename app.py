@@ -541,6 +541,53 @@ def view_individual(data: dict):
         apply_layout(fig, height=280, show_legend=True)
         chart_card("Compensation breakdown — base + OT + add. earnings", fig, key="ind-stack")
 
+    # Percentile rank over time
+    pcts = [rec["pctile"][rec_years.index(y)] if y in rec_years else None for y in ir]
+    start_pct = pcts[0] if pcts else None
+    end_pct = pcts[-1] if pcts else None
+
+    fig = go.Figure()
+    bands = [
+        (0, 25, "rgba(231, 76, 60, 0.06)"),
+        (25, 50, "rgba(241, 196, 15, 0.06)"),
+        (50, 75, "rgba(46, 204, 113, 0.06)"),
+        (75, 90, "rgba(52, 152, 219, 0.10)"),
+        (90, 100, "rgba(155, 89, 182, 0.12)"),
+    ]
+    for y0, y1, color in bands:
+        fig.add_hrect(y0=y0, y1=y1, fillcolor=color, layer="below", line_width=0)
+
+    fig.add_trace(go.Scatter(
+        x=ir, y=pcts, mode="lines+markers",
+        line=dict(color=ac, width=3),
+        marker=dict(size=8),
+        connectgaps=False,
+        hovertemplate="<b>%{x}</b><br>Percentile: %{y}<extra></extra>",
+    ))
+
+    if start_pct is not None:
+        fig.add_annotation(x=ir[0], y=start_pct, text=f"Start: {start_pct}",
+                           showarrow=True, arrowhead=2, ay=-30)
+    if end_pct is not None and len(ir) > 1:
+        fig.add_annotation(x=ir[-1], y=end_pct, text=f"Now: {end_pct}",
+                           showarrow=True, arrowhead=2, ay=-30)
+
+    fig.update_yaxes(range=[0, 100], title="Percentile rank", tickformat="d")
+    apply_layout(fig, height=320, show_legend=False, y_dollars=False)
+
+    direction = ""
+    if start_pct is not None and end_pct is not None:
+        diff = end_pct - start_pct
+        if abs(diff) <= 5:
+            direction = "Flat — relative position roughly unchanged"
+        elif diff > 5:
+            direction = f"▲ Climbing — gained {diff} percentile points"
+        else:
+            direction = f"▼ Sliding — lost {abs(diff)} percentile points"
+
+    chart_card("Percentile rank over time", fig, key="ind-pctile",
+               subtitle=direction)
+
     col_l, col_r = st.columns(2)
     with col_l:
         yy = ry[1:]
