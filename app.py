@@ -1492,7 +1492,7 @@ def view_org(data: dict):
     f_dy = (filter_stats or {}).get(str(dist_year)) if filter_stats else None
     f_v = round((f_dy["median"] - s_dy["median"]) / s_dy["median"] * 100) if f_dy else None
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1:
         metric_card(f"Org median ({dist_year})", fmt_dollar(s_dy["median"]),
                     sub="Full org", color="blue",
@@ -1522,6 +1522,25 @@ def view_org(data: dict):
                         sub="Top 10% earn above", color="teal",
                         delta=f"{fmt_dollar((p90 or 0) - s17.get('p90', 0), signed=True)} since 2017",
                         delta_dir="up")
+    with c6:
+        prev_year = dist_year - 1
+        realized = data.get("cohort_raises", {}).get(f"{prev_year}_{dist_year}")
+        if realized:
+            ac_ = realized["all_cohort"]
+            metric_card(
+                f"Realized Raise ({dist_year})",
+                f"{ac_['mean_pct']:.2f}%",
+                sub=(
+                    f"n={ac_['n']:,} · median {ac_['median_pct']:.2f}% · "
+                    f"{realized['raise_recipients']['pct_of_cohort']:.0f}% got raise"
+                ),
+                color="coral",
+            )
+        else:
+            metric_card(
+                f"Realized Raise ({dist_year})", "—",
+                sub="No prior year for comparison", color="coral",
+            )
 
     # Realized YoY raise history (same-cohort)
     cohort_data = data.get("cohort_raises", {})
