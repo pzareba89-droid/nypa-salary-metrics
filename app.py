@@ -1232,6 +1232,7 @@ def view_leaderboard(data: dict):
 
     years = data["all_years"]
     people = data["people"]
+    records = data["records"]
 
     MODE_LABELS = {
         "growth": "Total growth %", "cagr": "CAGR", "dollar": "$ gained",
@@ -1410,6 +1411,88 @@ def view_leaderboard(data: dict):
                 f"</div></div>",
                 unsafe_allow_html=True,
             )
+
+            # PL-034 — Personal raise pattern vs org P25–P75 band
+            cohort_data = data.get("cohort_raises", {})
+            if cohort_data:
+                ry_lb = [y for y in years if sy <= y <= ey]
+                yy_lb = ry_lb[1:]
+                rec_p = records.get(gap_name, {})
+                p_years = rec_p.get("years", [])
+                p_yoy = rec_p.get("yoy", [])
+                x_labels, p25s, p75s, person_pcts = [], [], [], []
+                for y_to in yy_lb:
+                    y_from = y_to - 1
+                    c_band = cohort_data.get(f"{y_from}_{y_to}")
+                    if not c_band:
+                        continue
+                    x_labels.append(f"{y_from}→{str(y_to)[-2:]}")
+                    p25s.append(c_band["org_p25_pct"])
+                    p75s.append(c_band["org_p75_pct"])
+                    if y_from in p_years and y_to in p_years:
+                        i_to = p_years.index(y_to)
+                        i_from = p_years.index(y_from)
+                        if i_to == i_from + 1:
+                            person_pcts.append(p_yoy[i_to])
+                        else:
+                            person_pcts.append(None)
+                    else:
+                        person_pcts.append(None)
+
+                if x_labels:
+                    p_color = avatar_color(gap_name)
+                    fig_pat = go.Figure()
+                    fig_pat.add_trace(go.Scatter(
+                        x=x_labels, y=p75s, name="Org P75",
+                        line=dict(color="rgba(55,138,221,0)"),
+                        mode="lines", showlegend=False,
+                        hovertemplate="<b>%{x}</b><br>Org P75: %{y:.2f}%<extra></extra>",
+                    ))
+                    fig_pat.add_trace(go.Scatter(
+                        x=x_labels, y=p25s, name="Org P25–P75 band",
+                        line=dict(color="rgba(55,138,221,0)"),
+                        mode="lines", fill="tonexty",
+                        fillcolor=rgba(LIGHT_BLUE, 0.20),
+                        hovertemplate="<b>%{x}</b><br>Org P25: %{y:.2f}%<extra></extra>",
+                    ))
+                    pos_labels = []
+                    for v, p25, p75 in zip(person_pcts, p25s, p75s):
+                        if v is None:
+                            pos_labels.append("—")
+                        elif v > p75:
+                            pos_labels.append("above middle 50%")
+                        elif v < p25:
+                            pos_labels.append("below middle 50%")
+                        else:
+                            pos_labels.append("inside middle 50%")
+                    customdata = list(zip(p25s, p75s, pos_labels))
+                    fig_pat.add_trace(go.Scatter(
+                        x=x_labels, y=person_pcts, name=f"{gap_name} raise",
+                        line=dict(color=p_color, width=2.5),
+                        mode="lines+markers",
+                        marker=dict(size=8),
+                        connectgaps=False,
+                        customdata=customdata,
+                        hovertemplate=(
+                            "<b>%{x}</b><br>"
+                            "Raise: %{y:.2f}%<br>"
+                            "Org P25: %{customdata[0]:.2f}%<br>"
+                            "Org P75: %{customdata[1]:.2f}%<br>"
+                            "Position: %{customdata[2]}<extra></extra>"
+                        ),
+                    ))
+                    apply_layout(fig_pat, height=300, show_legend=True, y_dollars=False)
+                    fig_pat.update_yaxes(title="YoY raise %", ticksuffix="%")
+                    chart_card(
+                        f"{gap_name} — raise pattern vs. org middle 50%",
+                        fig_pat, key="lb-gap-raise-pattern",
+                        subtitle=(
+                            "Shaded area = org P25–P75 raise range. "
+                            "Line = this person's actual YoY raise. "
+                            "Above the band = above 75% of org. "
+                            "Below the band = below 75% of org."
+                        ),
+                    )
 
     # Top N chart
     top = ranked[:top_n]
