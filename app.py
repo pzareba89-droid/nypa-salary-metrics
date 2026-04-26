@@ -308,6 +308,32 @@ def view_home(data: dict):
                 unsafe_allow_html=True,
             )
 
+    medians = [os_[str(y)]["median"] for y in years]
+    means = [os_[str(y)]["mean"] for y in years]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=years, y=medians, name="Median",
+        line=dict(color=BLUE, width=2),
+        mode="lines+markers",
+        hovertemplate="<b>%{x}</b><br>Median: $%{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=years, y=means, name="Mean",
+        line=dict(color=AMBER, width=2, dash="dash"),
+        mode="lines+markers",
+        fill="tonexty",
+        fillcolor=rgba(AMBER, 0.10),
+        hovertemplate="<b>%{x}</b><br>Mean: $%{y:,.0f}<extra></extra>",
+    ))
+    apply_layout(fig, height=300, show_legend=True, y_dollars=True)
+    chart_card(
+        "Mean vs median salary — 2017 to 2024", fig, key="home-mm-trend",
+        subtitle=(
+            "Gap between mean and median indicates how concentrated high earners are. "
+            "A widening gap = top-end pay growing faster than typical."
+        ),
+    )
+
 
 # ============================================================================
 # VIEW: INDIVIDUAL PROFILE
