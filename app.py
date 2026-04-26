@@ -1196,14 +1196,6 @@ def view_leaderboard(data: dict):
 
     with col_r:
         all_vals = [mode_val(d) for d in ranked if mode_val(d) is not None]
-        sorted_vals = sorted(v for v in all_vals if v is not None)
-        if sorted_vals:
-            p95_idx = int(len(sorted_vals) * 0.95)
-            x_max = sorted_vals[p95_idx] if p95_idx < len(sorted_vals) else sorted_vals[-1]
-            outlier_count = sum(1 for v in all_vals if v is not None and v > x_max)
-        else:
-            x_max = None
-            outlier_count = 0
         fig = go.Figure()
         fig.add_trace(go.Histogram(
             x=all_vals, nbinsx=30,
@@ -1211,14 +1203,7 @@ def view_leaderboard(data: dict):
                         line=dict(color=LIGHT_BLUE, width=1)),
         ))
         apply_layout(fig, height=max(260, 22 * len(top)), y_dollars=False)
-        if x_max is not None and all_vals:
-            fig.update_xaxes(range=[min(all_vals), x_max])
-        dist_subtitle = (
-            f"X-axis capped at 95th percentile. {outlier_count} outliers above this value not shown."
-            if outlier_count > 0 else ""
-        )
-        chart_card("Growth distribution — all employees", fig, key="lb-dist",
-                   subtitle=dist_subtitle)
+        chart_card("Growth distribution — all employees", fig, key="lb-dist")
 
     # Full table
     st.markdown("#### Full leaderboard")
