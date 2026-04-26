@@ -1159,6 +1159,7 @@ def lb_compute(sy: int, ey: int, _records_hash: int) -> list[dict]:
     records = data["records"]
     people = data["people"]
     org_stats = data["org_stats"]
+    cohort_raises = data.get("cohort_raises", {})
     ry = [y for y in data["all_years"] if sy <= y <= ey]
     if str(ey) in org_stats:
         latest_bases_all = []
@@ -1209,12 +1210,21 @@ def lb_compute(sy: int, ey: int, _records_hash: int) -> list[dict]:
         ly_stats = org_stats.get(str(ly))
         gap_med = round(latest_base - ly_stats["median"]) if ly_stats else None
         gap_mean = round(latest_base - ly_stats["mean"]) if ly_stats else None
+        aar = 0
+        for y_to in ir[1:]:
+            i_to = rec["years"].index(y_to)
+            if i_to > 0 and rec["years"][i_to - 1] == y_to - 1:
+                py = rec["yoy"][i_to]
+                trans = cohort_raises.get(f"{y_to - 1}_{y_to}")
+                if py is not None and trans and py > trans["all_cohort"]["mean_pct"]:
+                    aar += 1
         out.append({
             "name": name, "tg": tg, "ca": ca, "dg": dg, "ac": ac, "avgOT": avg_ot,
             "by": by, "byy": byy, "pr": pr, "fr": fr, "sp": sp,
             "bs": bs, "be": be, "fy": fy, "ly": ly, "partial": fy > sy or ly < ey,
             "tier": tier, "title": rec["titles"][li], "group": rec["groups"][li],
             "site": rec.get("site", ""), "pctile": pct, "gapMed": gap_med, "gapMean": gap_mean,
+            "aar": aar,
         })
     return out
 
@@ -1233,6 +1243,7 @@ def view_leaderboard(data: dict):
     MODE_LABELS = {
         "growth": "Total growth %", "cagr": "CAGR", "dollar": "$ gained",
         "accel": "Acceleration", "ot": "Avg OT", "yoy": "Best year",
+        "above_avg_raises": "Years above org avg",
     }
     CARD_LABELS = {
         "growth": "Top Total Grower",
@@ -1241,6 +1252,7 @@ def view_leaderboard(data: dict):
         "accel": "Most Accelerated",
         "ot": "Highest Avg OT",
         "yoy": "Biggest Single Jump",
+        "above_avg_raises": "Most Consistent Outperformer",
     }
     col1, col2, col3, col4, col5, col6 = st.columns([2, 1, 1, 1, 1, 1])
     with col1:
@@ -1264,7 +1276,7 @@ def view_leaderboard(data: dict):
         st.warning("End year must be >= start year.")
         return
 
-    ranked = lb_compute(sy, ey, 1)
+    ranked = lb_compute(sy, ey, 2)
 
     # Apply filters (group + site)
     if group_f:
@@ -1285,6 +1297,8 @@ def view_leaderboard(data: dict):
             return d["avgOT"]
         if mode == "yoy":
             return d["by"] if d["by"] is not None else -999
+        if mode == "above_avg_raises":
+            return d.get("aar", 0)
         return 0
 
     ranked.sort(key=mode_val, reverse=True)
@@ -1317,6 +1331,9 @@ def view_leaderboard(data: dict):
             top_sub = f"{fmt_dollar(g['avgOT'])} avg OT"
         elif mode == "yoy":
             top_sub = f"{g['by']}% in {g['byy']}" if g['by'] is not None else "—"
+        elif mode == "above_avg_raises":
+            n_aar = g.get("aar", 0)
+            top_sub = f"{n_aar} year{'s' if n_aar != 1 else ''} above org avg"
         else:
             top_sub = ""
         metric_card(CARD_LABELS[mode], g["name"], sub=top_sub, color="green")
@@ -1484,6 +1501,7 @@ def view_leaderboard(data: dict):
             "Avg OT": d["avgOT"],
             "Best year %": d["by"],
             "Best year": d["byy"],
+            "Yrs > org avg": d.get("aar", 0),
             "Title changes": d["pr"],
             "Freezes": d["fr"],
         })
@@ -1506,6 +1524,14 @@ def view_leaderboard(data: dict):
                 ),
             ),
             "Best year %": st.column_config.NumberColumn(format="%.1f%%"),
+            "Yrs > org avg": st.column_config.NumberColumn(
+                format="%d",
+                help=(
+                    "Number of year transitions in the selected range where this "
+                    "employee's YoY raise exceeded the org's same-cohort mean for "
+                    "that transition."
+                ),
+            ),
             "Tier": st.column_config.TextColumn(
                 help=(
                     "Rocket: ≥80% growth or ≥12% CAGR · "
