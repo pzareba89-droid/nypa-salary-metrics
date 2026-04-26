@@ -981,6 +981,63 @@ def view_comparison(data: dict):
     apply_layout(fig, height=300, show_legend=True)
     chart_card("Year-over-year $ change", fig, key="cmp-yoy")
 
+    # PL-015d — Comparison group vs org P25–P75 raise reference band
+    cohort_data = data.get("cohort_raises", {})
+    if cohort_data and yy:
+        x_labels, p25s, p75s, group_means = [], [], [], []
+        for y_to in yy:
+            y_from = y_to - 1
+            c_band = cohort_data.get(f"{y_from}_{y_to}")
+            if not c_band:
+                continue
+            x_labels.append(f"{y_from}→{str(y_to)[-2:]}")
+            p25s.append(c_band["org_p25_pct"])
+            p75s.append(c_band["org_p75_pct"])
+            member_pcts = []
+            for name in selected:
+                rec_ = records[name]
+                if y_from in rec_["years"] and y_to in rec_["years"]:
+                    i_to = rec_["years"].index(y_to)
+                    i_from = rec_["years"].index(y_from)
+                    if i_to == i_from + 1:
+                        yp = rec_["yoy"][i_to]
+                        if yp is not None:
+                            member_pcts.append(yp)
+            group_means.append(sum(member_pcts) / len(member_pcts) if member_pcts else None)
+
+        if x_labels:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=x_labels, y=p75s, name="Org P75",
+                line=dict(color="rgba(55,138,221,0)"),
+                mode="lines", showlegend=False,
+                hovertemplate="<b>%{x}</b><br>Org P75: %{y:.2f}%<extra></extra>",
+            ))
+            fig.add_trace(go.Scatter(
+                x=x_labels, y=p25s, name="Org P25–P75 band",
+                line=dict(color="rgba(55,138,221,0)"),
+                mode="lines", fill="tonexty",
+                fillcolor=rgba(LIGHT_BLUE, 0.20),
+                hovertemplate="<b>%{x}</b><br>Org P25: %{y:.2f}%<extra></extra>",
+            ))
+            fig.add_trace(go.Scatter(
+                x=x_labels, y=group_means, name="Comparison group mean",
+                line=dict(color=CORAL, width=2.5),
+                mode="lines+markers",
+                marker=dict(size=8),
+                connectgaps=False,
+                hovertemplate="<b>%{x}</b><br>Group mean: %{y:.2f}%<extra></extra>",
+            ))
+            apply_layout(fig, height=300, show_legend=True, y_dollars=False)
+            fig.update_yaxes(title="YoY raise %", ticksuffix="%")
+            chart_card(
+                "Comparison group raise vs org middle 50%", fig, key="cmp-org-band",
+                subtitle=(
+                    "Shaded area = org P25–P75 raise range for each year transition. "
+                    "Line = mean raise of selected comparison group members present in both years."
+                ),
+            )
+
     # Earnings overlay
     if overlay != "Off":
         show_ot = overlay in ("OT", "Both")
