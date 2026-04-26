@@ -1523,6 +1523,68 @@ def view_org(data: dict):
                         delta=f"{fmt_dollar((p90 or 0) - s17.get('p90', 0), signed=True)} since 2017",
                         delta_dir="up")
 
+    # Realized YoY raise history (same-cohort)
+    cohort_data = data.get("cohort_raises", {})
+    if cohort_data:
+        cohort_mode = st.radio(
+            "Cohort cut",
+            ["All cohort (incl. frozen)", "Raise recipients only"],
+            horizontal=True,
+            index=0,
+            key="org_cohort_mode",
+            help=(
+                "All cohort: includes employees who got $0 raise (frozen). "
+                "Raise recipients only: excludes $0 raises, shows what raises actually were. "
+                "Gap between them = workforce that was frozen."
+            ),
+        )
+        cut_key = "all_cohort" if cohort_mode == "All cohort (incl. frozen)" else "raise_recipients"
+        transitions = sorted(cohort_data.keys())
+        x_labels, means, medians, customdata = [], [], [], []
+        for t in transitions:
+            c = cohort_data[t]
+            cut = c[cut_key]
+            x_labels.append(f"{c['year_from']}→{str(c['year_to'])[-2:]}")
+            means.append(cut["mean_pct"])
+            medians.append(cut["median_pct"])
+            customdata.append([
+                cut["n"],
+                cut["mean_dollar"],
+                cut["median_dollar"],
+                c["raise_recipients"]["pct_of_cohort"],
+            ])
+        hover_tpl = (
+            "<b>%{x}</b><br>%{y:.2f}%<br>"
+            "n=%{customdata[0]:,}<br>"
+            "mean $: $%{customdata[1]:,}<br>"
+            "median $: $%{customdata[2]:,}<br>"
+            "%{customdata[3]:.1f}% got a raise"
+            "<extra>%{fullData.name}</extra>"
+        )
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=x_labels, y=means, name="Mean %",
+            marker=dict(color=BLUE),
+            customdata=customdata,
+            hovertemplate=hover_tpl,
+        ))
+        fig.add_trace(go.Bar(
+            x=x_labels, y=medians, name="Median %",
+            marker=dict(color=AMBER),
+            customdata=customdata,
+            hovertemplate=hover_tpl,
+        ))
+        fig.update_layout(barmode="group")
+        apply_layout(fig, height=300, show_legend=True, y_dollars=False)
+        fig.update_yaxes(title="YoY raise %", ticksuffix="%")
+        cut_subtitle = (
+            "All cohort — includes $0 raises (frozen employees pull means down)."
+            if cut_key == "all_cohort" else
+            "Raise recipients only — excludes frozen employees, shows the actual raise distribution."
+        )
+        chart_card("Realized YoY Raise History — Same-Cohort", fig,
+                   key="org-cohort-raises", subtitle=cut_subtitle)
+
     # Distribution chart
     col_l, col_r = st.columns(2)
     with col_l:
