@@ -1028,6 +1028,14 @@ def view_leaderboard(data: dict):
         "growth": "Total growth %", "cagr": "CAGR", "dollar": "$ gained",
         "accel": "Acceleration", "ot": "Avg OT", "yoy": "Best year",
     }
+    CARD_LABELS = {
+        "growth": "Top Total Grower",
+        "cagr": "Best CAGR Performer",
+        "dollar": "Top $ Earner Increase",
+        "accel": "Most Accelerated",
+        "ot": "Highest Avg OT",
+        "yoy": "Biggest Single Jump",
+    }
     col1, col2, col3, col4, col5, col6 = st.columns([2, 1, 1, 1, 1, 1])
     with col1:
         mode = st.radio("Rank by", list(MODE_LABELS.keys()),
@@ -1091,7 +1099,21 @@ def view_leaderboard(data: dict):
                     sub=f"{sy}–{ey}" + (f" · {group_f}" if group_f else "") + (f" · {site_f}" if site_f else ""),
                     color="blue")
     with c2:
-        metric_card("Top grower", g["name"], sub=f"{g['tg']}% total", color="green")
+        if mode == "growth":
+            top_sub = f"{g['tg']}% total"
+        elif mode == "cagr":
+            top_sub = f"{g['ca']}% / yr"
+        elif mode == "dollar":
+            top_sub = f"{fmt_dollar(g['dg'])} gained"
+        elif mode == "accel":
+            top_sub = f"{g['ac']:+.1f} accel" if g['ac'] is not None else "—"
+        elif mode == "ot":
+            top_sub = f"{fmt_dollar(g['avgOT'])} avg OT"
+        elif mode == "yoy":
+            top_sub = f"{g['by']}% in {g['byy']}" if g['by'] is not None else "—"
+        else:
+            top_sub = ""
+        metric_card(CARD_LABELS[mode], g["name"], sub=top_sub, color="green")
     with c3:
         metric_card("Best CAGR", c["name"], sub=f"{c['ca']}% / yr", color="amber")
     with c4:
