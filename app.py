@@ -1215,7 +1215,7 @@ def view_leaderboard(data: dict):
         ))
         apply_layout(fig, height=max(260, 22 * len(top)), y_dollars=False)
         fig.update_xaxes(showgrid=True, gridcolor="rgba(0,0,0,0.05)")
-        chart_card(f"Top {top_n} — {MODE_LABELS[mode]}", fig, key="lb-bar")
+        chart_card(f"Top {top_n} by {CARD_LABELS[mode]}", fig, key="lb-bar")
 
     with col_r:
         all_vals = [mode_val(d) for d in ranked if mode_val(d) is not None]
@@ -1226,7 +1226,8 @@ def view_leaderboard(data: dict):
                         line=dict(color=LIGHT_BLUE, width=1)),
         ))
         apply_layout(fig, height=max(260, 22 * len(top)), y_dollars=False)
-        chart_card("Growth distribution — all employees", fig, key="lb-dist")
+        chart_card(f"Distribution of {CARD_LABELS[mode]} across all employees",
+                   fig, key="lb-dist")
 
     # Full table
     st.markdown("#### Full leaderboard")
