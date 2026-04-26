@@ -1364,7 +1364,7 @@ def view_leaderboard(data: dict):
             top3 = ranked[min(2, len(ranked) - 1)]
             gap_top3 = mode_val(top3) - sv
             bc_map = {"growth": BLUE, "cagr": GREEN, "dollar": DARK_AMBER, "accel": PURPLE,
-                      "ot": GREEN, "yoy": RUST}
+                      "ot": GREEN, "yoy": RUST, "above_avg_raises": PINK}
             bc = bc_map[mode]
             rows = list(ranked[:3])
             if sub["rank"] > 3:
@@ -1423,7 +1423,8 @@ def view_leaderboard(data: dict):
     col_l, col_r = st.columns(2)
     with col_l:
         mode_colors = {"growth": BLUE, "cagr": GREEN, "dollar": DARK_AMBER,
-                       "accel": PURPLE, "ot": GREEN, "yoy": RUST}
+                       "accel": PURPLE, "ot": GREEN, "yoy": RUST,
+                       "above_avg_raises": PINK}
         bar_col = mode_colors[mode]
         names = [d["name"] for d in top]
         values = [mode_val(d) for d in top]
