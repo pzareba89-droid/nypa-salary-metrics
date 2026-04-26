@@ -84,8 +84,9 @@ def main() -> None:
     nypa_df = df[df["Authority Name"].str.contains("Power Authority", na=False)].copy()
     nypa_df = nypa_df.dropna(subset=["Full Name"])
     # ~0.3% of (Year, Full Name) pairs are distinct people sharing a name.
-    # Collapse to one row per (Year, Full Name) — matches how records[] is keyed elsewhere.
-    nypa_df = nypa_df.drop_duplicates(subset=["Year", "Full Name"], keep="last")
+    # Drop both rows — picking one (keep="last") would silently invent fictitious
+    # raises across years (e.g., John Smith #1's 2022 base vs. John Smith #2's 2023 base).
+    nypa_df = nypa_df.drop_duplicates(subset=["Year", "Full Name"], keep=False)
 
     all_years = sorted(int(y) for y in data["all_years"])
     data["cohort_raises"] = compute_cohort_raises(nypa_df, all_years)
