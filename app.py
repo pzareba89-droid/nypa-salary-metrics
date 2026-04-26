@@ -1219,15 +1219,46 @@ def view_leaderboard(data: dict):
 
     with col_r:
         all_vals = [mode_val(d) for d in ranked if mode_val(d) is not None]
+        sorted_vals = sorted(all_vals)
+        n = len(sorted_vals)
+        outlier_count = 0
+        subtitle = ""
+
+        if n > 20:
+            if mode == "accel":
+                p5_idx = max(0, int(n * 0.05))
+                p95_idx = min(n - 1, int(n * 0.95))
+                x_min = sorted_vals[p5_idx]
+                x_max = sorted_vals[p95_idx]
+                outlier_count = sum(1 for v in all_vals if v < x_min or v > x_max)
+                cap_label = "5th–95th percentile"
+            else:
+                p90_idx = min(n - 1, int(n * 0.90))
+                x_min = min(sorted_vals)
+                x_max = sorted_vals[p90_idx]
+                outlier_count = sum(1 for v in all_vals if v > x_max)
+                cap_label = "90th percentile"
+
+            filtered_vals = [v for v in all_vals if x_min <= v <= x_max]
+
+            if outlier_count > 0:
+                subtitle = f"X-axis capped at {cap_label}. {outlier_count} outliers not shown."
+        else:
+            filtered_vals = all_vals
+            x_min = min(sorted_vals) if sorted_vals else 0
+            x_max = max(sorted_vals) if sorted_vals else 1
+
         fig = go.Figure()
         fig.add_trace(go.Histogram(
-            x=all_vals, nbinsx=30,
+            x=filtered_vals,
+            nbinsx=50,
             marker=dict(color="rgba(55, 138, 221, 0.73)",
                         line=dict(color=LIGHT_BLUE, width=1)),
         ))
+        fig.update_xaxes(range=[x_min, x_max])
         apply_layout(fig, height=max(260, 22 * len(top)), y_dollars=False)
         chart_card(f"Distribution of {CARD_LABELS[mode]} across all employees",
-                   fig, key="lb-dist")
+                   fig, key="lb-dist", subtitle=subtitle)
 
     # Full table
     st.markdown("#### Full leaderboard")
