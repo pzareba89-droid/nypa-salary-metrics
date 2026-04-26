@@ -753,6 +753,26 @@ def view_comparison(data: dict):
         metric_card("Top grower", top_name,
                     sub=(f"+{top_m['tg']}%" if top_m else ""), color="amber")
 
+    # Absolute base salary chart (full width)
+    fig = go.Figure()
+    for i, name in enumerate(selected):
+        rec = records[name]
+        color = CMP_COLORS[i % len(CMP_COLORS)]
+        st_ = cmp_status(rec, sy, ey)
+        if st_["status"] == "absent":
+            continue
+        y_data = [rec["base"][rec["years"].index(y)] if y in rec["years"] else None for y in ry]
+        dash = "dash" if st_["status"] != "full" else "solid"
+        fig.add_trace(go.Scatter(
+            x=ry, y=y_data, mode="lines+markers", name=name,
+            line=dict(color=color, width=2, dash=dash),
+            marker=dict(size=6),
+            connectgaps=False,
+            hovertemplate=f"<b>{name}</b><br>%{{x}}: $%{{y:,.0f}}<extra></extra>",
+        ))
+    apply_layout(fig, height=320, show_legend=True, y_dollars=True)
+    chart_card("Base salary over time", fig, key="cmp-abs-base")
+
     # Indexed growth chart
     col_l, col_r = st.columns(2)
     with col_l:
