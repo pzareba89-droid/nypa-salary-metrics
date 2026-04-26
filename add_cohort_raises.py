@@ -79,10 +79,13 @@ def main() -> None:
     with open(JSON_PATH, encoding="utf-8") as f:
         data = json.load(f)
 
-    df = pd.read_csv(CSV_PATH)
+    df = pd.read_csv(CSV_PATH, low_memory=False)
     # Restrict to NYPA employees with a Full Name (matches what the rest of the JSON covers).
     nypa_df = df[df["Authority Name"].str.contains("Power Authority", na=False)].copy()
     nypa_df = nypa_df.dropna(subset=["Full Name"])
+    # ~0.3% of (Year, Full Name) pairs are distinct people sharing a name.
+    # Collapse to one row per (Year, Full Name) — matches how records[] is keyed elsewhere.
+    nypa_df = nypa_df.drop_duplicates(subset=["Year", "Full Name"], keep="last")
 
     all_years = sorted(int(y) for y in data["all_years"])
     data["cohort_raises"] = compute_cohort_raises(nypa_df, all_years)
