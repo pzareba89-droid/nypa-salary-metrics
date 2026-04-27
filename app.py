@@ -138,6 +138,19 @@ def fmt_pct(v, signed=False, decimals=1) -> str:
     return f"{v:.{decimals}f}%"
 
 
+def fmt_ordinal(n) -> str:
+    """Return n with English ordinal suffix: 1st, 2nd, 3rd, 4th, …, 21st, 22nd."""
+    if n is None:
+        return "—"
+    n_int = int(round(float(n)))
+    last_two = n_int % 100
+    if 11 <= last_two <= 13:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n_int % 10, "th")
+    return f"{n_int}{suffix}"
+
+
 def rgba(hex6: str, alpha: float) -> str:
     """Convert '#RRGGBB' + alpha (0–1) to a Plotly-friendly rgba string."""
     h = hex6.lstrip("#")
@@ -711,7 +724,7 @@ def analyze_peer_position(person_name, person_record, all_records, peer_groups, 
     direction = "below" if gap_to_median > 0 else "above"
     headline = (
         f"Compared to {n} peers in your professional engineering cohort across NYPA, "
-        f"your base salary is at the {int(round(pct))}th percentile. "
+        f"your base salary is at the {fmt_ordinal(pct)} percentile. "
         f"Median peer earns ${median:,.0f}; you earn ${person_salary:,.0f}."
     )
     narrative = (
@@ -1055,7 +1068,7 @@ def analyze_peer_growth(person_name, person_record, all_records, peer_groups, da
 
     headline = (
         f"Your {person_total_growth_pct:.1f}% total career growth ({person_cagr:.2f}% CAGR) "
-        f"ranks at the {int(round(growth_pct_rank))}th percentile vs peer engineers "
+        f"ranks at the {fmt_ordinal(growth_pct_rank)} percentile vs peer engineers "
         f"(median peer: {peer_med_growth:.1f}% growth, {peer_med_cagr:.2f}% CAGR)."
     )
 
@@ -1157,20 +1170,31 @@ def analyze_title_stripped(person_name, person_record, all_records, peer_groups,
     role_label = "non-craft" if role == "non_craft" else "craft"
 
     if site_cohort_avg is not None and wp_cohort_avg is not None:
+        # Same-sign gaps stack; opposite-sign gaps partially offset.
+        same_direction = (gap_site_vs_wp * gap_person_vs_site) > 0
+        connector_word = "another" if same_direction else "but"
+        person_dir_word = "above" if gap_person_vs_site > 0 else "below"
         headline = (
             f"{site} {role_label} cohort averages {site_cohort_avg:.1f}% annual raises vs "
             f"White Plains' {wp_cohort_avg:.1f}% — a {gap_site_vs_wp:+.1f} pt site-level "
-            f"gap. Within {site}, you average {person_avg_raise:.1f}% — another "
-            f"{gap_person_vs_site:+.1f} pts vs your local cohort."
+            f"gap. Within {site}, you average {person_avg_raise:.1f}% — {connector_word} "
+            f"{abs(gap_person_vs_site):.1f} pts {person_dir_word} your local cohort."
         )
+        if same_direction:
+            closing = "The structural and personal gaps compound."
+        else:
+            closing = (
+                "Your personal pattern runs opposite to the site-level gap, "
+                "partially offsetting the structural disadvantage."
+            )
         narrative = (
-            f"Two stacking gaps. First: your site's {role_label} cohort runs "
+            f"First: your site's {role_label} cohort runs "
             f"{abs(gap_site_vs_wp):.1f} pp "
             f"{'below' if gap_site_vs_wp < 0 else 'above'} the White Plains HQ benchmark. "
             f"Second: within your site, your personal {person_avg_raise:.1f}% average is "
             f"{abs(gap_person_vs_site):.1f} pp "
             f"{'below' if gap_person_vs_site < 0 else 'above'} the local {role_label} cohort. "
-            f"The structural and personal gaps compound."
+            f"{closing}"
         )
     else:
         headline = (
@@ -1775,6 +1799,747 @@ def build_report_payload(person_name: str, person_record: dict,
 
 
 # ============================================================================
+# PL-033 Report Renderers (chart_spec → plotly figure, payload → markdown)
+# ============================================================================
+
+def _figure_from_chart_spec(spec: dict) -> go.Figure:
+    """Dispatch a chart_spec dict to a plotly figure based on spec['type']."""
+    t = spec.get("type")
+    d = spec.get("data", {})
+    if t == "histogram":
+        return _fig_histogram_with_marker(d)
+    if t == "line_band":
+        return _fig_line_with_band(d)
+    if t == "dual_line":
+        return _fig_dual_line(d)
+    if t == "bar_compare":
+        return _fig_bar_compare(d)
+    if t == "horizontal_bar":
+        return _fig_horizontal_bar(d)
+    return go.Figure()
+
+
+def _fig_histogram_with_marker(d: dict) -> go.Figure:
+    """Histogram of peer_salaries with a vertical line at person_salary."""
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=d.get("peer_salaries", []),
+        nbinsx=30,
+        marker=dict(color=rgba(LIGHT_BLUE, 0.7), line=dict(color=BLUE, width=0.5)),
+        hovertemplate="$%{x:,.0f}<br>%{y} peers<extra></extra>",
+        name="Peers",
+    ))
+    person_x = d.get("person_salary")
+    if person_x is not None:
+        fig.add_vline(
+            x=person_x, line=dict(color=CORAL, width=3),
+            annotation_text=f"You: ${person_x:,.0f}",
+            annotation_position="top right",
+            annotation=dict(font=dict(color=CORAL, size=11)),
+        )
+    median = d.get("median")
+    if median is not None:
+        fig.add_vline(
+            x=median, line=dict(color=GREEN, width=2, dash="dash"),
+            annotation_text=f"Median: ${median:,.0f}",
+            annotation_position="bottom left",
+            annotation=dict(font=dict(color=GREEN, size=10)),
+        )
+    apply_layout(fig, height=320, show_legend=False, y_dollars=False)
+    fig.update_xaxes(tickprefix="$", tickformat=",")
+    return fig
+
+
+def _fig_line_with_band(d: dict) -> go.Figure:
+    """Person's raise line with org P25-P75 shaded band + dashed median line."""
+    fig = go.Figure()
+    x = d.get("year_labels", [])
+    p25 = d.get("org_p25_pcts", [])
+    p75 = d.get("org_p75_pcts", [])
+    median = d.get("org_median_pcts", [])
+    person = d.get("person_pcts", [])
+
+    if x and p25 and p75:
+        fig.add_trace(go.Scatter(
+            x=x, y=p75, mode="lines", line=dict(color="rgba(0,0,0,0)"),
+            showlegend=False, hoverinfo="skip",
+        ))
+        fig.add_trace(go.Scatter(
+            x=x, y=p25, mode="lines", fill="tonexty",
+            fillcolor=rgba(LIGHT_BLUE, 0.18),
+            line=dict(color="rgba(0,0,0,0)"),
+            name="Org P25–P75", showlegend=True,
+            hovertemplate="<b>%{x}</b><br>P25: %{y:.2f}%<extra></extra>",
+        ))
+    if x and median:
+        fig.add_trace(go.Scatter(
+            x=x, y=median, mode="lines",
+            line=dict(color=BLUE, width=1.5, dash="dash"),
+            name="Org median",
+            hovertemplate="<b>%{x}</b><br>Org median: %{y:.2f}%<extra></extra>",
+        ))
+    if x and person:
+        fig.add_trace(go.Scatter(
+            x=x, y=person, mode="lines+markers",
+            line=dict(color=CORAL, width=2.5),
+            marker=dict(size=8, color=CORAL),
+            name="You",
+            hovertemplate="<b>%{x}</b><br>You: %{y:.2f}%<extra></extra>",
+        ))
+    apply_layout(fig, height=320, show_legend=True, y_dollars=False)
+    fig.update_yaxes(ticksuffix="%")
+    return fig
+
+
+def _fig_dual_line(d: dict) -> go.Figure:
+    """Two salary trajectories: actual vs counter-factual."""
+    fig = go.Figure()
+    yrs = d.get("years", [])
+    actual = d.get("actual", [])
+    cf = d.get("counter_factual", [])
+    if yrs and actual:
+        fig.add_trace(go.Scatter(
+            x=yrs, y=actual, mode="lines+markers",
+            line=dict(color=CORAL, width=2.5),
+            marker=dict(size=7, color=CORAL),
+            name="Actual",
+            hovertemplate="<b>%{x}</b><br>Actual: $%{y:,.0f}<extra></extra>",
+        ))
+    if yrs and cf:
+        fig.add_trace(go.Scatter(
+            x=yrs, y=cf, mode="lines+markers",
+            line=dict(color=BLUE, width=2, dash="dash"),
+            marker=dict(size=6, color=BLUE),
+            name="If org-median raise each year",
+            hovertemplate="<b>%{x}</b><br>Counter-factual: $%{y:,.0f}<extra></extra>",
+        ))
+    apply_layout(fig, height=320, show_legend=True, y_dollars=True)
+    return fig
+
+
+def _fig_bar_compare(d: dict) -> go.Figure:
+    """Grouped bars: person vs peer median vs P75 across categories."""
+    cats = d.get("categories", [])
+    p_vals = d.get("person_values", [])
+    med_vals = d.get("peer_median_values", [])
+    p75_vals = d.get("peer_p75_values", [])
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=cats, y=p_vals, name="You",
+        marker=dict(color=CORAL),
+        text=[f"{v:.1f}%" for v in p_vals],
+        textposition="outside",
+        hovertemplate="<b>%{x}</b><br>You: %{y:.2f}%<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=cats, y=med_vals, name="Peer median",
+        marker=dict(color=BLUE),
+        text=[f"{v:.1f}%" for v in med_vals],
+        textposition="outside",
+        hovertemplate="<b>%{x}</b><br>Peer median: %{y:.2f}%<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=cats, y=p75_vals, name="Peer P75",
+        marker=dict(color=LAVENDER),
+        text=[f"{v:.1f}%" for v in p75_vals],
+        textposition="outside",
+        hovertemplate="<b>%{x}</b><br>Peer P75: %{y:.2f}%<extra></extra>",
+    ))
+    fig.update_layout(barmode="group")
+    apply_layout(fig, height=320, show_legend=True, y_dollars=False)
+    fig.update_yaxes(ticksuffix="%")
+    return fig
+
+
+def _fig_horizontal_bar(d: dict) -> go.Figure:
+    """Two flavors:
+      - Site comparison: bars=[{site,value,n}], plus person_avg marker
+      - Ask framing: labels + values + above_flags (already-exceeded benchmarks)
+    """
+    if "bars" in d:
+        rows = d.get("bars", [])
+        sites = [r["site"] for r in rows]
+        vals = [r["value"] for r in rows]
+        ns = [r.get("n") for r in rows]
+        person_site = d.get("person_site")
+        colors = [CORAL if s == person_site else LIGHT_BLUE for s in sites]
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            y=sites, x=vals, orientation="h",
+            marker=dict(color=colors),
+            text=[f"{v:.1f}% (n={n})" if n else f"{v:.1f}%"
+                  for v, n in zip(vals, ns)],
+            textposition="outside",
+            hovertemplate="<b>%{y}</b><br>Avg raise: %{x:.2f}%<extra></extra>",
+            showlegend=False,
+        ))
+        person_avg = d.get("person_avg")
+        if person_avg is not None:
+            fig.add_vline(
+                x=person_avg, line=dict(color=AMBER, width=2.5, dash="dash"),
+                annotation_text=f"Your personal avg: {person_avg:.1f}%",
+                annotation_position="top right",
+                annotation=dict(font=dict(color=AMBER, size=11)),
+            )
+        wp_v = d.get("white_plains_value")
+        if wp_v is not None and "White Plains" not in sites:
+            fig.add_vline(
+                x=wp_v, line=dict(color=GREEN, width=1.5, dash="dot"),
+                annotation_text=f"WP HQ: {wp_v:.1f}%",
+                annotation_position="bottom right",
+                annotation=dict(font=dict(color=GREEN, size=10)),
+            )
+        apply_layout(fig, height=max(280, 28 * len(sites) + 80),
+                     show_legend=False, y_dollars=False)
+        fig.update_xaxes(ticksuffix="%")
+        fig.update_yaxes(autorange="reversed")
+        return fig
+
+    labels = d.get("labels", [])
+    values = d.get("values", [])
+    deltas = d.get("deltas_pct", [])
+    above = d.get("above_flags", [False] * len(labels))
+    colors = []
+    for i, lbl in enumerate(labels):
+        if i == 0:
+            colors.append(CORAL)  # Current
+        elif above[i]:
+            colors.append(rgba(GREEN, 0.55))  # already exceeded
+        else:
+            colors.append(BLUE)  # actionable target
+
+    text_labels = []
+    for i, (v, dlt) in enumerate(zip(values, deltas)):
+        if i == 0:
+            text_labels.append(f"${v:,.0f}")
+        elif above[i]:
+            text_labels.append(f"${v:,.0f} (already above)")
+        else:
+            text_labels.append(f"${v:,.0f} ({dlt:+.1f}%)")
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        y=labels, x=values, orientation="h",
+        marker=dict(color=colors),
+        text=text_labels,
+        textposition="outside",
+        hovertemplate="<b>%{y}</b><br>$%{x:,.0f}<extra></extra>",
+        showlegend=False,
+    ))
+    apply_layout(fig, height=max(240, 40 * len(labels) + 80),
+                 show_legend=False, y_dollars=False)
+    fig.update_xaxes(tickprefix="$", tickformat=",")
+    fig.update_yaxes(autorange="reversed")
+    return fig
+
+
+def _build_executive_summary(payload: dict) -> str:
+    """Synthesize a 1-paragraph executive summary from case + counter-evidence."""
+    case = payload["case_arguments"]
+    context = payload["context_arguments"]
+    counter = [a for a in context if a.get("score_direction") == "counter_evidence"]
+
+    ask = next((a for a in case if a["id"] == "specific_ask"), None)
+    case_supp = [a for a in case if a.get("score_direction") == "case_supporting"
+                 and a["id"] != "specific_ask"]
+
+    parts: list[str] = []
+    if ask:
+        parts.append(ask["headline"])
+    for a in case_supp[:2]:
+        parts.append(a["headline"])
+
+    if counter:
+        n = len(counter)
+        parts.append(
+            f"Counter-evidence acknowledged: {n} finding{'s' if n != 1 else ''} "
+            f"point{'s' if n == 1 else ''} the other way (see Context section)."
+        )
+    return " ".join(parts)
+
+
+def _peer_composition_summary(peer_groups: dict) -> dict:
+    """Anonymized counts for the personal-view peer composition section."""
+    def _summarize(cohort: dict) -> dict:
+        members = cohort.get("members", [])
+        title_counts: dict[str, int] = {}
+        site_counts: dict[str, int] = {}
+        dept_counts: dict[str, int] = {}
+        for m in members:
+            t = m.get("title_latest") or "(unknown)"
+            title_counts[t] = title_counts.get(t, 0) + 1
+            s = m.get("site") or "(no site)"
+            site_counts[s] = site_counts.get(s, 0) + 1
+            d_ = m.get("dept_latest") or "(unknown)"
+            dept_counts[d_] = dept_counts.get(d_, 0) + 1
+        return {
+            "level": cohort.get("level"),
+            "n": cohort.get("n"),
+            "filter_description": cohort.get("filter_description"),
+            "titles": sorted(title_counts.items(), key=lambda kv: -kv[1]),
+            "sites": sorted(site_counts.items(), key=lambda kv: -kv[1]),
+            "departments": sorted(dept_counts.items(), key=lambda kv: -kv[1]),
+        }
+    return {
+        "local": _summarize(peer_groups.get("local", {})),
+        "market": _summarize(peer_groups.get("market", {})),
+        "person_role_type": peer_groups.get("person_role_type"),
+    }
+
+
+def generate_report_markdown(payload: dict) -> str:
+    """Generate the full report as Markdown text.
+
+    Excludes peer composition (personal-view only). Charts replaced with text
+    descriptions of underlying numbers.
+    """
+    rec = payload["person_record"]
+    pg = payload["peer_groups"]
+    cred = payload["credibility"]
+    case = payload["case_arguments"]
+    context = payload["context_arguments"]
+    counter = [a for a in context if a.get("score_direction") == "counter_evidence"]
+    name = payload["person_name"]
+    today = payload["generated_date"]
+    role_label = "non-craft" if pg["person_role_type"] == "non_craft" else "craft"
+
+    lines: list[str] = []
+    lines.append(f"# Compensation Analysis — {name}")
+    lines.append("")
+    lines.append("*Internal market analysis based on public NYPA payroll data "
+                 "(data.ny.gov, 2017–2024).*")
+    lines.append("")
+    lines.append(f"**Generated:** {today}")
+    lines.append("")
+    lines.append(f"**Credibility:** **{cred['level'].upper()}** — {cred['rationale']}")
+    if cred["warnings"]:
+        lines.append("")
+        lines.append("**Counter-evidence acknowledged:**")
+        for w in cred["warnings"]:
+            lines.append(f"- {w}")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # Executive summary
+    lines.append("## Executive Summary")
+    lines.append("")
+    lines.append(_build_executive_summary(payload))
+    lines.append("")
+
+    # Subject snapshot
+    lines.append("## Subject")
+    lines.append("")
+    lines.append(f"- **Latest base salary:** ${rec['base'][-1]:,} ({rec['years'][-1]})")
+    lines.append(f"- **Site:** {rec.get('site') or '(none)'}")
+    lines.append(f"- **Latest title:** {rec['titles'][-1]}")
+    lines.append(f"- **Tenure visible:** {rec['years'][0]} → {rec['years'][-1]} "
+                 f"({rec['years'][-1] - rec['years'][0]} years)")
+    lines.append(f"- **Role classification:** {role_label}")
+    lines.append("")
+
+    # The case
+    lines.append("## The Case")
+    lines.append("")
+    for a in case:
+        lines.append(f"### {a['headline']}")
+        lines.append("")
+        lines.append(a["narrative"])
+        lines.append("")
+        lines.append(f"<sub>Source: {a['data_source']}</sub>")
+        lines.append("")
+
+    # Counter-evidence / context
+    if counter:
+        lines.append("## Context — Findings That Don't Strongly Support the Case")
+        lines.append("")
+        lines.append(
+            "The following findings run counter to the case above and are disclosed "
+            "for transparency."
+        )
+        lines.append("")
+        for a in counter:
+            lines.append(f"**{a['headline']}**")
+            lines.append("")
+            lines.append(a["narrative"])
+            lines.append("")
+
+    # Career documentation
+    lines.append("## Career Documentation")
+    lines.append("")
+    lines.append("### Salary Trajectory")
+    lines.append("")
+    lines.append("| Year | Title | Group | Base | YoY % |")
+    lines.append("|---|---|---|---:|---:|")
+    for i, y in enumerate(rec["years"]):
+        yoy_v = rec["yoy"][i]
+        yoy_str = f"{yoy_v:.1f}%" if yoy_v is not None else "—"
+        lines.append(
+            f"| {y} | {rec['titles'][i]} | {rec['groups'][i]} | "
+            f"${rec['base'][i]:,} | {yoy_str} |"
+        )
+    lines.append("")
+
+    # The ask
+    ask = next((a for a in case if a["id"] == "specific_ask"), None)
+    if ask:
+        det = ask["details"]
+        lines.append("## The Ask")
+        lines.append("")
+        lines.append(ask["narrative"])
+        lines.append("")
+        lines.append("**Three framings:**")
+        lines.append("")
+        framings = det.get("alternative_framings", {})
+        for k in ("market_correction", "peer_alignment", "retention_aligned"):
+            if k in framings:
+                lines.append(f"- **{k.replace('_', ' ').title()}:** {framings[k]}")
+        lines.append("")
+        site_rate = det.get("site_raise_rate_pct")
+        market_rate = det.get("market_raise_rate_pct")
+        f5_site = det.get("forward_looking_dollar_5yr")
+        f5_mkt = det.get("forward_looking_dollar_5yr_at_market")
+        f5_gap = det.get("forward_looking_5yr_gap")
+        if f5_site is not None and f5_mkt is not None:
+            lines.append("**Forward-looking 5-year projection:**")
+            lines.append("")
+            lines.append(f"- At your site's current raise rate "
+                         f"({site_rate:.2f}% per year): **${f5_site:,.0f}**")
+            lines.append(f"- At the org-wide non-craft raise rate "
+                         f"({market_rate:.2f}% per year): **${f5_mkt:,.0f}**")
+            lines.append(f"- Compounding gap if site lag persists: **${f5_gap:,.0f}**")
+            lines.append("")
+
+    # Methodology
+    lines.append("## Methodology and Data Sources")
+    lines.append("")
+    lines.append("**Data source:** NYPA payroll records on data.ny.gov, "
+                 "spanning 2017–2024. All figures are public information.")
+    lines.append("")
+    lines.append("**Peer cohorts:**")
+    lines.append("")
+    lines.append(f"- *Local cohort* — {pg['local']['filter_description']}")
+    lines.append(f"- *Market cohort* — {pg['market']['filter_description']}")
+    lines.append("")
+    lines.append("**Calculation methodology:**")
+    lines.append("")
+    lines.append("- Annual raises measured as same-employee year-over-year base-salary change.")
+    lines.append("- Org median / P25 / P75 computed across all employees present in both years "
+                 "of each transition.")
+    lines.append("- Counter-factual trajectory compounds the org-median raise from the "
+                 "starting year forward.")
+    lines.append("- Career growth measured as total % change and CAGR over each peer's "
+                 "visible window (own start/end years per peer).")
+    lines.append("- Site × role-type raise pattern uses the latest title to classify each "
+                 "employee, then averages all their year transitions.")
+    lines.append("- Argument strength scored from log-scaled dollar impact, sample size, and "
+                 "statistical extremity, weighted by direction (case-supporting vs counter-evidence).")
+    lines.append("")
+    lines.append("**Limitations:**")
+    lines.append("")
+    lines.append("- Peer-cohort matching uses title-keyword overlap; subject-matter expertise "
+                 "and project responsibility are not encoded.")
+    lines.append("- Public payroll data does not include performance reviews, internal "
+                 "promotions in flight, or planned increases.")
+    lines.append("- Raise rates can be skewed by promotions and re-classifications.")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("*Source: data.ny.gov · NYPA payroll records · "
+                 f"Generated {today}*")
+    lines.append("")
+    return "\n".join(lines)
+
+
+_CRED_PILL_STYLE = {
+    "strong": f"background:#EAF3DE;color:#173404;border:1px solid {GREEN};",
+    "moderate": f"background:#FAEEDA;color:#412402;border:1px solid {AMBER};",
+    "weak": f"background:#FCEBEB;color:#791F1F;border:1px solid #C04848;",
+}
+
+
+def render_compensation_report(payload: dict) -> None:
+    """Render the full PL-033 report inline. Streamlit-side only."""
+    name = payload["person_name"]
+    rec = payload["person_record"]
+    pg = payload["peer_groups"]
+    cred = payload["credibility"]
+    today = payload["generated_date"]
+
+    # ---- SECTION 1: Controls ----
+    ctrl_left, ctrl_mid, ctrl_right = st.columns([2, 2, 3])
+    with ctrl_left:
+        show_peer_details = st.checkbox(
+            "Show peer details",
+            value=False,
+            key=f"_pl033_peerdetail_{name}",
+            help=(
+                "Personal view — verify the algorithm picked the right peer group. "
+                "Anonymized counts only. Not included in the markdown export."
+            ),
+        )
+    with ctrl_mid:
+        last_token = name.split()[-1].replace("'", "").replace(" ", "_")
+        md_filename = f"compensation_analysis_{last_token}_{today}.md"
+        md_text = generate_report_markdown(payload)
+        st.download_button(
+            "⬇  Download as Markdown",
+            data=md_text,
+            file_name=md_filename,
+            mime="text/markdown",
+            key=f"_pl033_dl_{name}",
+            help="Excludes the personal-view peer composition section.",
+        )
+    with ctrl_right:
+        pill_style = _CRED_PILL_STYLE.get(cred["level"], _CRED_PILL_STYLE["weak"])
+        st.markdown(
+            f"<div style='display:flex;align-items:center;gap:10px;'>"
+            f"<span style='{pill_style};padding:4px 12px;border-radius:14px;"
+            f"font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;'>"
+            f"Credibility: {cred['level']}</span>"
+            f"<span style='font-size:11px;color:#666;'>{cred['rationale']}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ---- SECTION 2: Report Header ----
+    st.markdown(f"# Compensation Analysis — {name}")
+    st.markdown(
+        "<div style='color:#888;font-size:12px;font-style:italic;margin-top:-8px;'>"
+        "Internal market analysis based on public NYPA payroll data (data.ny.gov, 2017–2024)."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div style='color:#666;font-size:11px;margin-bottom:8px;'>"
+        f"Generated: {today}</div>",
+        unsafe_allow_html=True,
+    )
+
+    if cred["warnings"]:
+        warnings_html = "<ul style='margin:4px 0 0 18px;padding:0;font-size:11px;color:#791F1F;'>"
+        for w in cred["warnings"]:
+            warnings_html += f"<li>{w}</li>"
+        warnings_html += "</ul>"
+        st.markdown(
+            f"<div class='callout' style='border-left-color:#C04848;background:#FCEBEB;"
+            f"color:#791F1F;'><b>Counter-evidence acknowledged:</b>{warnings_html}</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ---- SECTION 3: Executive Summary ----
+    st.markdown("### Executive Summary")
+    summary = _build_executive_summary(payload)
+    st.markdown(
+        f"<div class='callout' style='border-left-color:{BLUE};background:#F0F6FB;"
+        f"color:#0C447C;font-size:12px;'>{summary}</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ---- SECTION 4: The Case ----
+    st.markdown("### The Case")
+    for i, a in enumerate(payload["case_arguments"]):
+        st.markdown(
+            f"<div style='font-size:13px;font-weight:600;color:#111;margin-top:14px;"
+            f"margin-bottom:6px;'>{i + 1}. {a['headline']}</div>",
+            unsafe_allow_html=True,
+        )
+        spec = a.get("chart_spec") or {}
+        if spec:
+            fig = _figure_from_chart_spec(spec)
+            chart_card(
+                spec.get("title", ""),
+                fig,
+                key=f"pl033-case-{a['id']}-{name}",
+                subtitle=spec.get("subtitle", ""),
+            )
+        st.markdown(
+            f"<div style='font-size:12px;color:#333;line-height:1.55;margin-top:6px;'>"
+            f"{a['narrative']}</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f"<div style='font-size:10px;color:#999;margin-top:4px;margin-bottom:10px;'>"
+            f"Source: {a['data_source']}</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ---- SECTION 5: Context / Counter-evidence ----
+    counter = [c for c in payload["context_arguments"]
+               if c.get("score_direction") == "counter_evidence"]
+    if counter:
+        st.markdown("### Context — Findings That Don't Strongly Support the Case")
+        st.markdown(
+            "<div style='font-size:11px;color:#666;font-style:italic;'>"
+            "These findings run counter to the case above and are disclosed for transparency."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        for a in counter:
+            st.markdown(
+                f"<div style='border-left:2px solid #aaa;padding-left:10px;margin-top:10px;'>"
+                f"<div style='font-size:12px;font-weight:600;color:#444;'>{a['headline']}</div>"
+                f"<div style='font-size:11px;color:#555;margin-top:3px;line-height:1.5;'>"
+                f"{a['narrative']}</div></div>",
+                unsafe_allow_html=True,
+            )
+
+    # ---- SECTION 6: Career Documentation ----
+    st.markdown("### Career Documentation")
+    yrs = rec["years"]
+    base = rec["base"]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=yrs, y=base, mode="lines+markers",
+        line=dict(color=BLUE, width=2.5),
+        marker=dict(size=8, color=BLUE),
+        name="Base salary",
+        hovertemplate="<b>%{x}</b><br>$%{y:,.0f}<extra></extra>",
+    ))
+    apply_layout(fig, height=280, show_legend=False, y_dollars=True)
+    chart_card("Salary trajectory", fig, key=f"pl033-traj-{name}",
+               subtitle=f"{yrs[0]}–{yrs[-1]} base salary")
+    title_rows = []
+    for i, y in enumerate(yrs):
+        yoy_v = rec["yoy"][i]
+        title_rows.append({
+            "Year": y,
+            "Title": rec["titles"][i],
+            "Group": rec["groups"][i],
+            "Base": base[i],
+            "YoY %": yoy_v,
+        })
+    df_titles = pd.DataFrame(title_rows)
+    st.dataframe(
+        df_titles,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Base": st.column_config.NumberColumn(format="$%d"),
+            "YoY %": st.column_config.NumberColumn(format="%.1f%%"),
+        },
+    )
+
+    # ---- SECTION 7: The Ask ----
+    ask = next((a for a in payload["case_arguments"] if a["id"] == "specific_ask"), None)
+    if ask:
+        det = ask["details"]
+        st.markdown("### The Ask")
+        st.markdown(
+            f"<div style='font-size:12px;color:#333;line-height:1.55;'>"
+            f"{ask['narrative']}</div>",
+            unsafe_allow_html=True,
+        )
+        framings = det.get("alternative_framings", {})
+        framing_html = "<div style='margin-top:8px;'>"
+        for k, label in (("market_correction", "Market correction"),
+                         ("peer_alignment", "Peer alignment"),
+                         ("retention_aligned", "Retention-aligned")):
+            if k in framings:
+                framing_html += (
+                    f"<div style='padding:6px 0;border-bottom:1px solid #eee;font-size:12px;'>"
+                    f"<span style='font-weight:600;color:#555;'>{label}:</span> "
+                    f"<span style='color:#333;'>{framings[k]}</span></div>"
+                )
+        framing_html += "</div>"
+        st.markdown(framing_html, unsafe_allow_html=True)
+
+        f5_site = det.get("forward_looking_dollar_5yr")
+        f5_mkt = det.get("forward_looking_dollar_5yr_at_market")
+        f5_gap = det.get("forward_looking_5yr_gap")
+        site_rate = det.get("site_raise_rate_pct")
+        market_rate = det.get("market_raise_rate_pct")
+        if f5_site is not None and f5_mkt is not None:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                metric_card("5-yr at site rate", fmt_dollar(f5_site),
+                            sub=f"{site_rate:.2f}%/yr", color="amber")
+            with c2:
+                metric_card("5-yr at org rate", fmt_dollar(f5_mkt),
+                            sub=f"{market_rate:.2f}%/yr", color="green")
+            with c3:
+                metric_card("5-yr compounding gap", fmt_dollar(f5_gap, signed=True),
+                            sub="if site lag persists", color="coral")
+
+    # ---- SECTION 8: Methodology ----
+    with st.expander("Methodology and Data Sources", expanded=False):
+        st.markdown(
+            "**Data source:** NYPA payroll records on data.ny.gov, spanning 2017–2024. "
+            "All figures are public information."
+        )
+        st.markdown("**Peer cohorts:**")
+        st.markdown(f"- *Local cohort* — {pg['local']['filter_description']}")
+        st.markdown(f"- *Market cohort* — {pg['market']['filter_description']}")
+        st.markdown("**Calculation methodology:**")
+        st.markdown(
+            "- Annual raises measured as same-employee year-over-year base-salary change.\n"
+            "- Org median / P25 / P75 computed across all employees present in both years "
+            "of each transition.\n"
+            "- Counter-factual trajectory compounds the org-median raise from the starting "
+            "year forward.\n"
+            "- Career growth measured as total % change and CAGR over each peer's visible "
+            "window (own start/end years per peer).\n"
+            "- Site × role-type raise pattern uses the latest title to classify each "
+            "employee, then averages all their year transitions.\n"
+            "- Argument strength scored from log-scaled dollar impact, sample size, and "
+            "statistical extremity, weighted by direction (case-supporting vs counter-evidence)."
+        )
+        st.markdown("**Limitations:**")
+        st.markdown(
+            "- Peer-cohort matching uses title-keyword overlap; subject-matter expertise and "
+            "project responsibility are not encoded.\n"
+            "- Public payroll data does not include performance reviews, internal promotions "
+            "in flight, or planned increases.\n"
+            "- Raise rates can be skewed by promotions and re-classifications."
+        )
+
+    # ---- SECTION 9: Peer Composition (only when toggle is ON) ----
+    if show_peer_details:
+        st.markdown("### Peer Group Composition — Personal View")
+        st.markdown(
+            "<div style='background:#FCEBEB;color:#791F1F;border-left:3px solid #C04848;"
+            "padding:6px 10px;font-size:11px;border-radius:6px;margin-bottom:8px;'>"
+            "<b>Personal view only:</b> this section is for verification and is "
+            "<b>excluded</b> from the markdown export. Anonymized counts only — no names."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        composition = _peer_composition_summary(pg)
+        for label, key in (("Local cohort", "local"), ("Market cohort", "market")):
+            cohort = composition[key]
+            st.markdown(f"#### {label}")
+            st.markdown(
+                f"<div style='font-size:12px;color:#444;'>"
+                f"<b>{cohort['level']}</b> · n={cohort['n']}<br>"
+                f"<i>{cohort['filter_description']}</i></div>",
+                unsafe_allow_html=True,
+            )
+            t_col, s_col = st.columns(2)
+            with t_col:
+                st.markdown(
+                    "<div style='font-size:11px;font-weight:600;color:#888;"
+                    "text-transform:uppercase;letter-spacing:.05em;margin-top:8px;'>"
+                    "Top titles</div>",
+                    unsafe_allow_html=True,
+                )
+                top_titles = cohort["titles"][:8]
+                if top_titles:
+                    df_t = pd.DataFrame(top_titles, columns=["Title", "n"])
+                    st.dataframe(df_t, hide_index=True, use_container_width=True)
+            with s_col:
+                st.markdown(
+                    "<div style='font-size:11px;font-weight:600;color:#888;"
+                    "text-transform:uppercase;letter-spacing:.05em;margin-top:8px;'>"
+                    "Sites</div>",
+                    unsafe_allow_html=True,
+                )
+                sites = cohort["sites"][:8]
+                if sites:
+                    df_s = pd.DataFrame(sites, columns=["Site", "n"])
+                    st.dataframe(df_s, hide_index=True, use_container_width=True)
+
+
+# ============================================================================
 # VIEW: HOME
 # ============================================================================
 def view_home(data: dict):
@@ -2278,6 +3043,32 @@ def view_individual(data: dict):
             ),
         },
     )
+
+    # --------------------------------------------------------------------
+    # PL-033 Compensation Report (per-person, on demand)
+    # --------------------------------------------------------------------
+    st.markdown("---")
+    show_key = f"_pl033_show_{person}"
+    if not st.session_state.get(show_key, False):
+        st.markdown(
+            "<div style='font-size:11px;color:#888;margin-bottom:6px;'>"
+            "Generate a manager-handover compensation report for this employee — "
+            "case-first analysis with honest counter-evidence and a Markdown export."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("📋 Generate Compensation Report",
+                     key=f"_pl033_gen_btn_{person}", type="primary"):
+            st.session_state[show_key] = True
+            st.rerun()
+    else:
+        with st.spinner("Generating compensation report…"):
+            payload = build_report_payload(person, rec, records, data)
+        render_compensation_report(payload)
+        if st.button("Hide compensation report",
+                     key=f"_pl033_hide_btn_{person}"):
+            st.session_state[show_key] = False
+            st.rerun()
 
 
 # ============================================================================
