@@ -642,6 +642,814 @@ def resolve_title_similar_peers(person_name: str, person_record: dict, all_recor
 
 
 # ============================================================================
+# PL-033 Report Analyses
+# ============================================================================
+# Each analyze_X function shares the same signature and returns a standardized
+# result dict (see PL-033 contract). All numeric fields are JSON-serializable;
+# strength is left at 0.0 — credibility scoring happens in Step 4. No colleague
+# names ever leave these analyses — only counts, medians, percentiles.
+
+def _safe_stats(vals: list[float]) -> dict:
+    """Mean/std/median/p25/p75 from a list of floats. None-tolerant.
+
+    Percentiles use linear interpolation between the two nearest order
+    statistics (matches numpy.percentile default).
+    """
+    vals = [v for v in vals if v is not None]
+    n = len(vals)
+    if n == 0:
+        return {"n": 0, "mean": None, "std": None, "median": None, "p25": None, "p75": None}
+    s = sorted(vals)
+    m = sum(s) / n
+    var = sum((v - m) ** 2 for v in s) / n
+    sd = var ** 0.5
+
+    def _pct(p: float) -> float:
+        if n == 1:
+            return s[0]
+        idx = (n - 1) * p / 100.0
+        lo = int(idx)
+        hi = min(lo + 1, n - 1)
+        frac = idx - lo
+        return s[lo] + (s[hi] - s[lo]) * frac
+
+    return {"n": n, "mean": m, "std": sd, "median": _pct(50), "p25": _pct(25), "p75": _pct(75)}
+
+
+def _percentile_rank(sorted_vals: list[float], target: float) -> float:
+    """Where does target rank in sorted_vals (0-100)? Ties get half-weight."""
+    if not sorted_vals:
+        return 0.0
+    n = len(sorted_vals)
+    below = sum(1 for v in sorted_vals if v < target)
+    equal = sum(1 for v in sorted_vals if v == target)
+    return round((below + 0.5 * equal) / n * 100, 1)
+
+
+def analyze_peer_position(person_name, person_record, all_records, peer_groups, data) -> dict:
+    """Where does this person sit in their MARKET peer group's salary distribution?"""
+    market = peer_groups["market"]
+    members = market["members"]
+    yrs = person_record["years"]
+    li = len(yrs) - 1
+    person_salary = person_record["base"][li]
+    person_year = yrs[li]
+
+    peer_salaries = sorted([float(m["base_latest"]) for m in members
+                            if m.get("base_latest")])
+    stats = _safe_stats(peer_salaries)
+    n = stats["n"]
+    median = stats["median"] or 0.0
+    p75 = stats["p75"] or 0.0
+    pct = _percentile_rank(peer_salaries, person_salary)
+    gap_to_median = (median - person_salary) if median else 0.0
+    gap_to_p75 = (p75 - person_salary) if p75 else 0.0
+    peers_above = sum(1 for v in peer_salaries if v > person_salary)
+    peers_below = sum(1 for v in peer_salaries if v < person_salary)
+
+    direction = "below" if gap_to_median > 0 else "above"
+    headline = (
+        f"Compared to {n} peers in your professional engineering cohort across NYPA, "
+        f"your base salary is at the {int(round(pct))}th percentile. "
+        f"Median peer earns ${median:,.0f}; you earn ${person_salary:,.0f}."
+    )
+    narrative = (
+        f"Across the {n}-person market cohort sharing your role and title family, "
+        f"{peers_above} earn more than you and {peers_below} earn less. "
+        f"You sit ${abs(gap_to_median):,.0f} {direction} the peer median, "
+        f"${abs(gap_to_p75):,.0f} {'below' if gap_to_p75 > 0 else 'above'} the P75."
+    )
+
+    z = ((person_salary - stats["mean"]) / stats["std"]) if stats["std"] else 0.0
+    if pct < 45:
+        tag = "underpaid_vs_market"
+    elif pct > 55:
+        tag = "overpaid_vs_market"
+    else:
+        tag = "at_market"
+
+    return {
+        "id": "peer_position",
+        "headline": headline,
+        "details": {
+            "person_salary": person_salary,
+            "person_year": person_year,
+            "person_percentile": pct,
+            "peer_median": median,
+            "peer_p75": p75,
+            "peer_mean": stats["mean"],
+            "gap_to_median": gap_to_median,
+            "gap_to_p75": gap_to_p75,
+            "peers_above": peers_above,
+            "peers_below": peers_below,
+            "n_peers": n,
+        },
+        "narrative": narrative,
+        "data_source": (
+            f"Market cohort — {market['level']}, n={n}. "
+            f"{market['filter_description']}. Latest year only ({person_year})."
+        ),
+        "chart_spec": {
+            "type": "histogram",
+            "data": {
+                "peer_salaries": peer_salaries,
+                "person_salary": person_salary,
+                "person_label": person_name,
+                "median": median,
+                "p75": p75,
+            },
+            "title": f"Base salary distribution — market cohort ({person_year})",
+            "subtitle": f"n={n} engineering peers across NYPA",
+        },
+        "credibility_inputs": {
+            "n_peers": n,
+            "dollar_impact": float(gap_to_median),
+            "extremity": abs(z),
+            "narrative_corroboration_tag": tag,
+        },
+        "strength": 0.0,
+    }
+
+
+_YOY_TIE_TOL_PCT_PTS = 0.05  # treat |gap| <= 0.05 pp as a tie (covers float-rounded zeros)
+
+
+def analyze_yoy_raise_pattern(person_name, person_record, all_records, peer_groups, data) -> dict:
+    """How often has this person's annual raise beaten / tied / fallen below the org median?"""
+    yrs = person_record["years"]
+    yoy = person_record["yoy"]
+    cohort_raises = data.get("cohort_raises", {})
+    tol = _YOY_TIE_TOL_PCT_PTS
+
+    per_transition: list[dict] = []
+    for i in range(1, len(yrs)):
+        person_pct = yoy[i]
+        if person_pct is None:
+            continue
+        key = f"{yrs[i-1]}_{yrs[i]}"
+        c = cohort_raises.get(key)
+        if not c:
+            continue
+        org_med = c["all_cohort"]["median_pct"]
+        gap = person_pct - org_med
+        if gap > tol:
+            outcome = "beat"
+        elif gap < -tol:
+            outcome = "below"
+        else:
+            outcome = "tied"
+        per_transition.append({
+            "year_transition": key,
+            "year_label": f"{yrs[i-1]}→{str(yrs[i])[-2:]}",
+            "person_raise_pct": person_pct,
+            "org_median_pct": org_med,
+            "org_p25_pct": c["org_p25_pct"],
+            "org_p75_pct": c["org_p75_pct"],
+            "outcome": outcome,
+            "gap_pct_pts": gap,
+        })
+
+    n_trans = len(per_transition)
+    beat = [t for t in per_transition if t["outcome"] == "beat"]
+    tied = [t for t in per_transition if t["outcome"] == "tied"]
+    below = [t for t in per_transition if t["outcome"] == "below"]
+    n_beat = len(beat)
+    n_tied = len(tied)
+    n_below = len(below)
+    avg_gap_below = (sum(t["gap_pct_pts"] for t in below) / n_below) if below else 0.0
+
+    worst = min(below, key=lambda t: t["gap_pct_pts"]) if below else None
+    best = max(per_transition, key=lambda t: t["gap_pct_pts"]) if per_transition else None
+    worst_year = worst["year_label"] if worst else None
+    worst_gap = worst["gap_pct_pts"] if worst else None
+    best_year = best["year_label"] if best else None
+    best_gap = best["gap_pct_pts"] if best else None
+
+    headline = (
+        f"In {n_trans} year transitions: beat the org median in {n_beat}, tied in {n_tied}, "
+        f"fell below in {n_below}. "
+        f"When below, average shortfall: {abs(avg_gap_below):.1f} percentage points."
+    )
+
+    if n_below > 0 and n_beat > 0:
+        narrative = (
+            f"Mixed pattern across {n_trans} transitions: above org median in {n_beat}, "
+            f"matching it in {n_tied}, behind in {n_below} (avg shortfall "
+            f"{abs(avg_gap_below):.1f} pp). Best: {best_year} ({best_gap:+.1f} pp); "
+            f"worst: {worst_year} ({worst_gap:+.1f} pp)."
+        )
+    elif n_below > 0:
+        narrative = (
+            f"You met or fell short of the org median in {n_tied + n_below} of {n_trans} "
+            f"transitions, with {n_below} clear shortfalls averaging "
+            f"{abs(avg_gap_below):.1f} pp below. Worst: {worst_year} ({worst_gap:+.1f} pp)."
+        )
+    elif n_beat > 0:
+        narrative = (
+            f"You beat or matched the org median in every transition: {n_beat} above, "
+            f"{n_tied} at parity. Best: {best_year} ({best_gap:+.1f} pp)."
+        )
+    else:
+        narrative = (
+            f"All {n_tied} transitions matched the org median exactly — no clear "
+            f"out- or under-performance signal."
+        )
+
+    if n_beat >= 5:
+        tag = "raises_outperforming"
+    elif n_below >= 4:
+        tag = "raises_below_norm"
+    elif (n_beat + n_tied) >= 5:
+        tag = "raises_at_norm"
+    else:
+        tag = "raises_mixed"
+
+    return {
+        "id": "yoy_raise_pattern",
+        "headline": headline,
+        "details": {
+            "per_transition": per_transition,
+            "n_transitions": n_trans,
+            "count_beat": n_beat,
+            "count_tied": n_tied,
+            "count_below": n_below,
+            "avg_gap_when_below": avg_gap_below,
+            "worst_gap_year": worst_year,
+            "worst_gap_pct_pts": worst_gap,
+            "best_gap_year": best_year,
+            "best_gap_pct_pts": best_gap,
+            "tie_tolerance_pct_pts": tol,
+        },
+        "narrative": narrative,
+        "data_source": (
+            f"All-cohort YoY raise medians from cohort_raises table "
+            f"(employees present in both years). {n_trans} transitions covered. "
+            f"Tie tolerance: ±{tol:.2f} pp."
+        ),
+        "chart_spec": {
+            "type": "line_band",
+            "data": {
+                "year_labels": [t["year_label"] for t in per_transition],
+                "person_pcts": [t["person_raise_pct"] for t in per_transition],
+                "org_median_pcts": [t["org_median_pct"] for t in per_transition],
+                "org_p25_pcts": [t["org_p25_pct"] for t in per_transition],
+                "org_p75_pcts": [t["org_p75_pct"] for t in per_transition],
+                "outcomes": [t["outcome"] for t in per_transition],
+            },
+            "title": "Your annual raise vs NYPA P25–P75 band",
+            "subtitle": "Line = your raise; shaded band = org-wide P25 to P75; dashed = org median",
+        },
+        "credibility_inputs": {
+            "n_peers": n_trans,
+            "dollar_impact": 0.0,
+            "extremity": abs(avg_gap_below) if n_below else 0.0,
+            "narrative_corroboration_tag": tag,
+        },
+        "strength": 0.0,
+    }
+
+
+def analyze_cumulative_gap(person_name, person_record, all_records, peer_groups, data) -> dict:
+    """Counter-factual: where would this person be if every raise matched the org median?"""
+    yrs = person_record["years"]
+    base = person_record["base"]
+    cohort_raises = data.get("cohort_raises", {})
+
+    starting_year = yrs[0]
+    starting_salary = base[0]
+    actual_salary = base[-1]
+    latest_year = yrs[-1]
+
+    counter_factual = [float(starting_salary)]
+    actual_path = [float(starting_salary)]
+    yearly_gaps = [0.0]
+    cur_cf = float(starting_salary)
+    for i in range(1, len(yrs)):
+        c = cohort_raises.get(f"{yrs[i-1]}_{yrs[i]}")
+        org_med = c["all_cohort"]["median_pct"] if c else 0.0
+        cur_cf = cur_cf * (1 + org_med / 100.0)
+        counter_factual.append(cur_cf)
+        actual_path.append(float(base[i]))
+        yearly_gaps.append(cur_cf - float(base[i]))
+
+    counter_factual_salary = counter_factual[-1]
+    dollar_gap = counter_factual_salary - actual_salary
+    pct_gap = (dollar_gap / actual_salary * 100.0) if actual_salary else 0.0
+    compounding_lost = sum(yearly_gaps)
+
+    if dollar_gap > 0:
+        narrative = (
+            f"If your annual raises had matched the org median each year since "
+            f"{starting_year}, your current base would be ${counter_factual_salary:,.0f} — "
+            f"${dollar_gap:,.0f} ({pct_gap:.1f}%) above your actual ${actual_salary:,.0f}. "
+            f"That gap compounds: roughly ${compounding_lost:,.0f} in cumulative annual income "
+            f"never realized over the {latest_year - starting_year}-year window."
+        )
+    else:
+        narrative = (
+            f"If your annual raises had only matched the org median each year since "
+            f"{starting_year}, your base would be ${counter_factual_salary:,.0f}. "
+            f"Your actual ${actual_salary:,.0f} sits ${abs(dollar_gap):,.0f} "
+            f"({abs(pct_gap):.1f}%) above the counter-factual."
+        )
+
+    headline = (
+        f"If you had received the org median raise each year since {starting_year}, "
+        f"your current base would be approximately ${counter_factual_salary:,.0f} "
+        f"(actual: ${actual_salary:,.0f}). Cumulative gap: ${dollar_gap:,.0f}."
+    )
+
+    if dollar_gap > 0:
+        tag = "underpaid_vs_market"
+    elif dollar_gap < 0:
+        tag = "overpaid_vs_market"
+    else:
+        tag = "at_market"
+
+    return {
+        "id": "cumulative_gap",
+        "headline": headline,
+        "details": {
+            "starting_year": starting_year,
+            "starting_salary": starting_salary,
+            "latest_year": latest_year,
+            "actual_salary": actual_salary,
+            "counter_factual_salary": counter_factual_salary,
+            "dollar_gap": dollar_gap,
+            "pct_gap": pct_gap,
+            "compounding_lost": compounding_lost,
+            "yearly_actual": actual_path,
+            "yearly_counter_factual": counter_factual,
+            "yearly_gaps": yearly_gaps,
+            "years": list(yrs),
+        },
+        "narrative": narrative,
+        "data_source": (
+            f"Counter-factual built by compounding the all-cohort median raise % from "
+            f"cohort_raises, applied to {starting_year} starting base."
+        ),
+        "chart_spec": {
+            "type": "dual_line",
+            "data": {
+                "years": list(yrs),
+                "actual": actual_path,
+                "counter_factual": counter_factual,
+            },
+            "title": "Actual vs counter-factual salary trajectory",
+            "subtitle": (
+                f"Counter-factual = {starting_year} base compounded by org median "
+                f"raise each year"
+            ),
+        },
+        "credibility_inputs": {
+            "n_peers": 0,
+            "dollar_impact": float(dollar_gap),
+            "extremity": abs(pct_gap) / 5.0,
+            "narrative_corroboration_tag": tag,
+        },
+        "strength": 0.0,
+    }
+
+
+def analyze_peer_growth(person_name, person_record, all_records, peer_groups, data) -> dict:
+    """Career growth (total + CAGR) vs MARKET peer cohort."""
+    market = peer_groups["market"]
+    members = market["members"]
+    yrs = person_record["years"]
+    base = person_record["base"]
+
+    person_yrs_span = yrs[-1] - yrs[0]
+    person_first = base[0]
+    person_last = base[-1]
+    person_total_growth_pct = ((person_last / person_first) - 1) * 100 if person_first else 0.0
+    person_cagr = (
+        ((person_last / person_first) ** (1.0 / person_yrs_span) - 1) * 100
+        if person_first and person_yrs_span > 0 else 0.0
+    )
+
+    peer_growths: list[float] = []
+    peer_cagrs: list[float] = []
+    for m in members:
+        bf = m.get("base_first")
+        bl = m.get("base_latest")
+        yf = m.get("year_first")
+        yl = m.get("year_latest")
+        if not bf or not bl or yf is None or yl is None:
+            continue
+        span = yl - yf
+        if span <= 0 or bf <= 0:
+            continue
+        peer_growths.append((bl / bf - 1) * 100)
+        peer_cagrs.append(((bl / bf) ** (1.0 / span) - 1) * 100)
+
+    growth_stats = _safe_stats(peer_growths)
+    cagr_stats = _safe_stats(peer_cagrs)
+    growth_pct_rank = _percentile_rank(sorted(peer_growths), person_total_growth_pct)
+    cagr_pct_rank = _percentile_rank(sorted(peer_cagrs), person_cagr)
+
+    peer_med_growth = growth_stats["median"] or 0.0
+    peer_p75_growth = growth_stats["p75"] or 0.0
+    peer_med_cagr = cagr_stats["median"] or 0.0
+    peer_p75_cagr = cagr_stats["p75"] or 0.0
+
+    headline = (
+        f"Your {person_total_growth_pct:.1f}% total career growth ({person_cagr:.2f}% CAGR) "
+        f"ranks at the {int(round(growth_pct_rank))}th percentile vs peer engineers "
+        f"(median peer: {peer_med_growth:.1f}% growth, {peer_med_cagr:.2f}% CAGR)."
+    )
+
+    direction = "trailing" if growth_pct_rank < 50 else "leading"
+    narrative = (
+        f"Over your {person_yrs_span}-year visible window you grew "
+        f"{person_total_growth_pct:.1f}% — {direction} the {len(peer_growths)}-peer "
+        f"market cohort whose median grew {peer_med_growth:.1f}% (P75 {peer_p75_growth:.1f}%). "
+        f"On annualized terms you compound at {person_cagr:.2f}% vs peer median "
+        f"{peer_med_cagr:.2f}%."
+    )
+
+    if growth_pct_rank < 45:
+        tag = "growth_lagging"
+    elif growth_pct_rank > 55:
+        tag = "growth_leading"
+    else:
+        tag = "growth_at_norm"
+
+    return {
+        "id": "peer_growth",
+        "headline": headline,
+        "details": {
+            "person_total_growth_pct": person_total_growth_pct,
+            "person_cagr": person_cagr,
+            "person_year_span": person_yrs_span,
+            "growth_percentile": growth_pct_rank,
+            "cagr_percentile": cagr_pct_rank,
+            "peer_median_total_growth": peer_med_growth,
+            "peer_p75_total_growth": peer_p75_growth,
+            "peer_median_cagr": peer_med_cagr,
+            "peer_p75_cagr": peer_p75_cagr,
+            "n_peers_with_growth": len(peer_growths),
+        },
+        "narrative": narrative,
+        "data_source": (
+            f"Market cohort — {market['level']}. Compared total growth and CAGR against "
+            f"{len(peer_growths)} peers' visible windows (own start/end years per peer)."
+        ),
+        "chart_spec": {
+            "type": "bar_compare",
+            "data": {
+                "categories": ["Total growth %", "CAGR %"],
+                "person_values": [person_total_growth_pct, person_cagr],
+                "peer_median_values": [peer_med_growth, peer_med_cagr],
+                "peer_p75_values": [peer_p75_growth, peer_p75_cagr],
+            },
+            "title": "Career growth vs peer market cohort",
+            "subtitle": f"You vs peer median and P75 (n={len(peer_growths)})",
+        },
+        "credibility_inputs": {
+            "n_peers": len(peer_growths),
+            "dollar_impact": 0.0,
+            "extremity": abs(growth_pct_rank - 50) / 50.0,
+            "narrative_corroboration_tag": tag,
+        },
+        "strength": 0.0,
+    }
+
+
+def analyze_title_stripped(person_name, person_record, all_records, peer_groups, data) -> dict:
+    """Structural site/role-type comparison: where does this person fit in raise patterns?
+
+    NOTE: This replaces the original within-role title-stripped analysis with the
+    site x role_type structural comparison validated in PL-033 Step 2.
+    """
+    yrs = person_record["years"]
+    yoy = person_record["yoy"]
+    role = peer_groups.get("person_role_type", "non_craft")
+    site = (person_record.get("site") or "").strip() or "(no site)"
+
+    person_raises = [v for v in yoy[1:] if v is not None]
+    person_avg_raise = (sum(person_raises) / len(person_raises)) if person_raises else 0.0
+
+    pattern = compute_site_role_raise_pattern(all_records)
+    by_site = pattern["by_site"]
+    org_wide = pattern["org_wide"]
+    role_key = "non_craft_pct" if role == "non_craft" else "craft_pct"
+    n_key = "n_non_craft" if role == "non_craft" else "n_craft"
+
+    site_cohort_avg = by_site.get(site, {}).get(role_key)
+    wp_cohort_avg = by_site.get("White Plains", {}).get(role_key)
+    org_cohort_avg = org_wide.get(role_key)
+
+    gap_person_vs_site = (
+        (person_avg_raise - site_cohort_avg) if site_cohort_avg is not None else None
+    )
+    gap_site_vs_wp = (
+        (site_cohort_avg - wp_cohort_avg)
+        if site_cohort_avg is not None and wp_cohort_avg is not None
+        else None
+    )
+    gap_site_vs_org = (
+        (site_cohort_avg - org_cohort_avg)
+        if site_cohort_avg is not None and org_cohort_avg is not None
+        else None
+    )
+
+    role_label = "non-craft" if role == "non_craft" else "craft"
+
+    if site_cohort_avg is not None and wp_cohort_avg is not None:
+        headline = (
+            f"{site} {role_label} cohort averages {site_cohort_avg:.1f}% annual raises vs "
+            f"White Plains' {wp_cohort_avg:.1f}% — a {gap_site_vs_wp:+.1f} pt site-level "
+            f"gap. Within {site}, you average {person_avg_raise:.1f}% — another "
+            f"{gap_person_vs_site:+.1f} pts vs your local cohort."
+        )
+        narrative = (
+            f"Two stacking gaps. First: your site's {role_label} cohort runs "
+            f"{abs(gap_site_vs_wp):.1f} pp "
+            f"{'below' if gap_site_vs_wp < 0 else 'above'} the White Plains HQ benchmark. "
+            f"Second: within your site, your personal {person_avg_raise:.1f}% average is "
+            f"{abs(gap_person_vs_site):.1f} pp "
+            f"{'below' if gap_person_vs_site < 0 else 'above'} the local {role_label} cohort. "
+            f"The structural and personal gaps compound."
+        )
+    else:
+        headline = (
+            f"{site} {role_label} cohort raise pattern not directly comparable; "
+            f"your {len(person_raises)}-year average raise is {person_avg_raise:.1f}%."
+        )
+        narrative = (
+            f"Site-level structural data is incomplete for {site}/{role_label}. "
+            f"Personal average raise: {person_avg_raise:.1f}% across "
+            f"{len(person_raises)} transitions."
+        )
+
+    site_bars: list[dict] = []
+    for s, row in by_site.items():
+        v = row.get(role_key)
+        if v is not None:
+            site_bars.append({"site": s, "value": v, "n": row.get(n_key, 0)})
+    site_bars.sort(key=lambda r: -r["value"])
+
+    if gap_site_vs_wp is not None and gap_site_vs_wp < -0.3:
+        tag = "site_lagging"
+    elif gap_site_vs_wp is not None and gap_site_vs_wp > 0.3:
+        tag = "site_leading"
+    else:
+        tag = "site_neutral"
+
+    return {
+        "id": "title_stripped",
+        "headline": headline,
+        "details": {
+            "person_site": site,
+            "person_role_type": role,
+            "person_avg_raise_pct": person_avg_raise,
+            "site_cohort_avg_pct": site_cohort_avg,
+            "white_plains_cohort_avg_pct": wp_cohort_avg,
+            "org_cohort_avg_pct": org_cohort_avg,
+            "gap_person_vs_site_cohort": gap_person_vs_site,
+            "gap_site_vs_wp": gap_site_vs_wp,
+            "gap_site_vs_org": gap_site_vs_org,
+            "n_person_transitions": len(person_raises),
+            "n_site_employees": by_site.get(site, {}).get(n_key, 0),
+        },
+        "narrative": narrative,
+        "data_source": (
+            f"compute_site_role_raise_pattern() over all NYPA records, role_type={role}. "
+            f"Person classified by latest title; site avg uses all transitions of all "
+            f"role-typed employees at the site."
+        ),
+        "chart_spec": {
+            "type": "horizontal_bar",
+            "data": {
+                "bars": site_bars,
+                "person_site": site,
+                "person_avg": person_avg_raise,
+                "white_plains_value": wp_cohort_avg,
+                "org_value": org_cohort_avg,
+            },
+            "title": f"Average annual raise by site — {role_label} cohort",
+            "subtitle": "All NYPA sites; marker shows your personal average",
+        },
+        "credibility_inputs": {
+            "n_peers": by_site.get(site, {}).get(n_key, 0),
+            "dollar_impact": 0.0,
+            "extremity": abs(gap_site_vs_wp) if gap_site_vs_wp is not None else 0.0,
+            "narrative_corroboration_tag": tag,
+        },
+        "strength": 0.0,
+    }
+
+
+def analyze_specific_ask(person_name, person_record, all_records, peer_groups, data) -> dict:
+    """Translate the gap into concrete dollar/% targets (MARKET cohort).
+
+    Honest framing: when the person already exceeds a benchmark, that benchmark
+    is reported as 'already above by $X', not as a negative ask. The headline
+    surfaces only positive (actionable) targets, plus a forward-looking 5-year
+    projection at site vs market raise rates so the report can frame
+    'maintenance' asks as well as 'correction' asks.
+    """
+    market = peer_groups["market"]
+    members = market["members"]
+    yrs = person_record["years"]
+    li = len(yrs) - 1
+    current_salary = person_record["base"][li]
+
+    peer_salaries = sorted([float(m["base_latest"]) for m in members
+                            if m.get("base_latest")])
+    stats = _safe_stats(peer_salaries)
+    target_p50 = stats["median"] or float(current_salary)
+    target_p75 = stats["p75"] or float(current_salary)
+    target_minimum = (current_salary + target_p50) / 2.0
+
+    pct_inc_p50 = ((target_p50 - current_salary) / current_salary * 100.0) if current_salary else 0.0
+    pct_inc_p75 = ((target_p75 - current_salary) / current_salary * 100.0) if current_salary else 0.0
+    pct_inc_min = ((target_minimum - current_salary) / current_salary * 100.0) if current_salary else 0.0
+
+    above_p50 = pct_inc_p50 < 0
+    above_p75 = pct_inc_p75 < 0
+    above_min = pct_inc_min < 0
+
+    # ---- Forward-looking 5-year projections (site vs market raise rates) ----
+    pattern = compute_site_role_raise_pattern(all_records)
+    role = peer_groups.get("person_role_type", "non_craft")
+    role_key = "non_craft_pct" if role == "non_craft" else "craft_pct"
+    site = (person_record.get("site") or "").strip() or "(no site)"
+    site_rate = pattern["by_site"].get(site, {}).get(role_key)
+    market_rate = pattern["org_wide"].get(role_key)
+
+    def _project(rate_pct):
+        if rate_pct is None:
+            return None
+        return current_salary * ((1 + rate_pct / 100.0) ** 5)
+
+    fwd_5yr_site = _project(site_rate)
+    fwd_5yr_market = _project(market_rate)
+    fwd_5yr_gap = (
+        (fwd_5yr_market - fwd_5yr_site)
+        if fwd_5yr_site is not None and fwd_5yr_market is not None
+        else None
+    )
+
+    # ---- Headline: only mention positive (actionable) asks ----
+    if not above_p50 and not above_p75 and not above_min:
+        # All targets are above current — original underpayment framing
+        headline = (
+            f"To reach peer median: ${target_p50:,.0f} ({pct_inc_p50:+.1f}%). "
+            f"To reach peer P75: ${target_p75:,.0f} ({pct_inc_p75:+.1f}%). "
+            f"Minimum corrective ask: ${target_minimum:,.0f} ({pct_inc_min:+.1f}%)."
+        )
+    elif above_p50 and not above_p75:
+        # P75 is the only positive target
+        excess_med = current_salary - target_p50
+        excess_min = current_salary - target_minimum
+        headline = (
+            f"To reach peer P75: ${target_p75:,.0f} ({pct_inc_p75:+.1f}%). "
+            f"Already above peer median by ${excess_med:,.0f} and "
+            f"${excess_min:,.0f} above the minimum corrective target."
+        )
+    else:
+        # All benchmarks already exceeded — pivot to maintenance framing
+        excess_med = current_salary - target_p50
+        excess_p75 = current_salary - target_p75
+        headline = (
+            f"Currently above all peer benchmarks (peer median by "
+            f"${excess_med:,.0f}, P75 by ${excess_p75:,.0f}). "
+            f"Forward-looking ask: maintain or exceed current peer P75 position."
+        )
+
+    # ---- Alternative framings: each is honest about above-vs-below ----
+    if above_p50:
+        market_correction = (
+            f"Currently above peer median by ${current_salary - target_p50:,.0f}"
+        )
+    else:
+        market_correction = (
+            f"Adjust to professional engineering peer median: "
+            f"${target_p50:,.0f} ({pct_inc_p50:+.1f}%)"
+        )
+
+    if above_p75:
+        peer_alignment = "Currently at top quartile or above"
+    else:
+        peer_alignment = (
+            f"Align with top quartile of professional engineering peers: "
+            f"${target_p75:,.0f} ({pct_inc_p75:+.1f}%)"
+        )
+
+    if above_p50 and above_p75 and above_min:
+        retention_aligned = (
+            "Maintain peer P75 alignment with sustained above-median raises"
+        )
+    elif above_min:
+        retention_aligned = (
+            f"Already above the minimum corrective target by "
+            f"${current_salary - target_minimum:,.0f}"
+        )
+    else:
+        retention_aligned = (
+            f"Minimum correction toward peer median: "
+            f"${target_minimum:,.0f} ({pct_inc_min:+.1f}%)"
+        )
+
+    framings = {
+        "market_correction": market_correction,
+        "peer_alignment": peer_alignment,
+        "retention_aligned": retention_aligned,
+    }
+
+    # ---- Narrative ----
+    if above_p50 and above_p75:
+        narrative = (
+            f"You sit above all three peer benchmarks. The forward-looking question "
+            f"is rate-of-growth, not catch-up. At your site's average raise rate "
+            f"({site_rate:.2f}% per year), in 5 years you'd reach "
+            f"${fwd_5yr_site:,.0f}; at the org-wide non-craft rate "
+            f"({market_rate:.2f}%), ${fwd_5yr_market:,.0f} — a "
+            f"${fwd_5yr_gap:,.0f} compounding gap if site lag persists."
+            if fwd_5yr_site and fwd_5yr_market else
+            f"You sit above all three peer benchmarks. The forward-looking question "
+            f"is rate-of-growth, not catch-up."
+        )
+    elif above_p50:
+        narrative = (
+            f"Above peer median by ${current_salary - target_p50:,.0f}, "
+            f"but {abs(pct_inc_p75):.1f}% below P75. Reaching P75 is the only "
+            f"actionable upward target from peer benchmarks. All targets derive "
+            f"from the {stats['n']}-peer market cohort."
+        )
+    else:
+        narrative = (
+            f"Three framings of the same underlying gap. The minimum correction "
+            f"({pct_inc_min:+.1f}%) splits the difference toward peer median; "
+            f"reaching the peer median requires {pct_inc_p50:+.1f}%; reaching the P75 "
+            f"quartile requires {pct_inc_p75:+.1f}%. All three derive from the "
+            f"{stats['n']}-peer market cohort, not invented."
+        )
+
+    # ---- Tag ----
+    if above_p50 and above_p75 and above_min:
+        tag = "ask_maintenance"
+    elif pct_inc_p75 > 1:
+        tag = "ask_to_reach_p75"
+    elif pct_inc_p50 > 1:
+        tag = "ask_to_correct_underpayment"
+    else:
+        tag = "ask_marginal"
+
+    return {
+        "id": "specific_ask",
+        "headline": headline,
+        "details": {
+            "current_salary": current_salary,
+            "target_p50": target_p50,
+            "target_p75": target_p75,
+            "target_minimum": target_minimum,
+            "pct_increase_p50": pct_inc_p50,
+            "pct_increase_p75": pct_inc_p75,
+            "pct_increase_min": pct_inc_min,
+            "above_p50": above_p50,
+            "above_p75": above_p75,
+            "above_min": above_min,
+            "alternative_framings": framings,
+            "n_peers": stats["n"],
+            "forward_looking_dollar_5yr": fwd_5yr_site,
+            "forward_looking_dollar_5yr_at_market": fwd_5yr_market,
+            "forward_looking_5yr_gap": fwd_5yr_gap,
+            "site_raise_rate_pct": site_rate,
+            "market_raise_rate_pct": market_rate,
+        },
+        "narrative": narrative,
+        "data_source": (
+            f"Market cohort — {market['level']}, n={stats['n']}. Targets derived "
+            f"from peer median and P75 of latest base salaries. 5-year projections "
+            f"compound at site/org non-craft raise rates from "
+            f"compute_site_role_raise_pattern()."
+        ),
+        "chart_spec": {
+            "type": "horizontal_bar",
+            "data": {
+                "labels": ["Current", "Min ask", "Peer median", "Peer P75"],
+                "values": [current_salary, target_minimum, target_p50, target_p75],
+                "deltas_pct": [0.0, pct_inc_min, pct_inc_p50, pct_inc_p75],
+                "above_flags": [False, above_min, above_p50, above_p75],
+            },
+            "title": "Ask framings — current vs three target levels",
+            "subtitle": "Bars labeled 'already above' if current exceeds the benchmark",
+        },
+        "credibility_inputs": {
+            "n_peers": stats["n"],
+            "dollar_impact": float(
+                (target_p75 - current_salary) if above_p50 else (target_p50 - current_salary)
+            ),
+            "extremity": abs(pct_inc_p75 if above_p50 else pct_inc_p50) / 10.0,
+            "narrative_corroboration_tag": tag,
+        },
+        "strength": 0.0,
+    }
+
+
+# ============================================================================
 # VIEW: HOME
 # ============================================================================
 def view_home(data: dict):
