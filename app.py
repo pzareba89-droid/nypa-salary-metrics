@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -1446,6 +1447,330 @@ def analyze_specific_ask(person_name, person_record, all_records, peer_groups, d
             "narrative_corroboration_tag": tag,
         },
         "strength": 0.0,
+    }
+
+
+# ============================================================================
+# PL-033 Strength Scorer + Selector + Credibility
+# ============================================================================
+# A good lawyer makes the strongest defensible case while honestly disclosing
+# counter-evidence. These functions implement that for the report:
+#   - score_argument_strength: numeric ranking of how compelling each finding is
+#   - select_top_arguments: case-supporting findings → headline; counter → context
+#   - compute_overall_credibility: honest "Strong / Moderate / Weak" verdict
+#   - build_report_payload: orchestrator the UI calls
+
+# Tag → direction. Tags not listed default to "neutral".
+_CASE_SUPPORTING_TAGS = frozenset({
+    "ask_to_reach_p75",
+    "ask_to_correct_underpayment",
+    "raises_below_norm",
+    "site_lagging",
+    "growth_lagging",
+    "gap_widening",
+    "underpaid_vs_market",
+})
+
+_NEUTRAL_TAGS = frozenset({
+    "raises_at_norm",
+    "raises_mixed",
+    "growth_at_norm",
+    "at_market",
+    "site_neutral",
+    "ask_marginal",
+})
+
+_COUNTER_EVIDENCE_TAGS = frozenset({
+    "overpaid_vs_market",
+    "no_correction_needed",
+    "ask_maintenance",
+    "raises_outperforming",
+    "growth_leading",
+    "site_leading",
+})
+
+# Short, audience-facing label for each counter-evidence tag — used in the
+# credibility "warnings" list so the report can name what works against the case
+# without dumping the full headline.
+_TAG_WARNING_TEMPLATES = {
+    "overpaid_vs_market": "Currently above peer median",
+    "ask_maintenance": "All peer benchmarks already exceeded",
+    "raises_outperforming": "Raises consistently above org norm",
+    "growth_leading": "Career growth leading peers",
+    "site_leading": "Site raise pattern leads HQ benchmark",
+    "no_correction_needed": "No correction needed by peer benchmarks",
+}
+
+
+def _tag_direction(tag: str) -> str:
+    if tag in _CASE_SUPPORTING_TAGS:
+        return "case_supporting"
+    if tag in _COUNTER_EVIDENCE_TAGS:
+        return "counter_evidence"
+    return "neutral"
+
+
+def score_argument_strength(analysis_result: dict, person_record: dict,
+                            peer_groups: dict) -> dict:
+    """Score how compelling a single analysis is.
+
+    raw_score = (dollar_score + sample_score + extremity_score) * (1 + direction_modifier)
+
+    where direction_modifier is +1 / 0 / -0.5 for case_supporting / neutral /
+    counter_evidence — so case-supporting analyses score ~2x higher than the
+    same-magnitude counter-evidence.
+    """
+    ci = analysis_result["credibility_inputs"]
+    dollar_impact = abs(float(ci.get("dollar_impact", 0) or 0))
+    n_peers = max(int(ci.get("n_peers", 0) or 0), 0)
+    extremity = max(float(ci.get("extremity", 0) or 0), 0.0)
+    tag = ci.get("narrative_corroboration_tag", "")
+
+    dollar_score = min(math.log10(max(dollar_impact, 1.0)), 5.0)
+    sample_score = min(math.log10(max(n_peers, 1)), 3.0)
+    extremity_score = min(extremity, 3.0)
+
+    direction = _tag_direction(tag)
+    if direction == "case_supporting":
+        modifier = 1.0
+    elif direction == "counter_evidence":
+        modifier = -0.5
+    else:
+        modifier = 0.0
+
+    component_sum = dollar_score + sample_score + extremity_score
+    raw_score = component_sum * (1.0 + modifier)
+
+    return {
+        "raw_score": raw_score,
+        "components": {
+            "dollar": dollar_score,
+            "sample": sample_score,
+            "extremity": extremity_score,
+            "direction_modifier": modifier,
+            "component_sum": component_sum,
+        },
+        "direction": direction,
+    }
+
+
+def select_top_arguments(scored_analyses: list[dict],
+                         max_count: int = 5, min_count: int = 3) -> dict:
+    """Pick case-supporting findings for the headline; route counter to context.
+
+    Selection rules (priority order):
+      1. ALWAYS include specific_ask (the punchline).
+      2. Add top scored case-supporting analyses up to max_count total.
+      3. If still below min_count, pad with neutrals (highest-strength first).
+      4. Counter-evidence is never picked — it goes to context_arguments.
+
+    Within both lists, ordering is by strength desc.
+    """
+    by_id = {a["id"]: a for a in scored_analyses}
+
+    case_supp_sorted = sorted(
+        (a for a in scored_analyses if a.get("score_direction") == "case_supporting"),
+        key=lambda a: -a["strength"],
+    )
+    neutrals_sorted = sorted(
+        (a for a in scored_analyses if a.get("score_direction") == "neutral"),
+        key=lambda a: -a["strength"],
+    )
+
+    selected: list[dict] = []
+    selected_ids: set[str] = set()
+
+    if "specific_ask" in by_id:
+        selected.append(by_id["specific_ask"])
+        selected_ids.add("specific_ask")
+
+    for a in case_supp_sorted:
+        if len(selected) >= max_count:
+            break
+        if a["id"] not in selected_ids:
+            selected.append(a)
+            selected_ids.add(a["id"])
+
+    if len(selected) < min_count:
+        for a in neutrals_sorted:
+            if len(selected) >= min_count:
+                break
+            if a["id"] not in selected_ids:
+                selected.append(a)
+                selected_ids.add(a["id"])
+
+    case_arguments = sorted(selected, key=lambda a: -a["strength"])
+    context_arguments = sorted(
+        [a for a in scored_analyses if a["id"] not in selected_ids],
+        key=lambda a: -a["strength"],
+    )
+
+    n_case_supp_in_top = sum(
+        1 for a in case_arguments if a.get("score_direction") == "case_supporting"
+    )
+    n_padded = len(case_arguments) - n_case_supp_in_top
+    n_context = len(context_arguments)
+
+    summary_parts = [
+        f"Selected {n_case_supp_in_top} case-supporting argument"
+        f"{'s' if n_case_supp_in_top != 1 else ''}"
+    ]
+    if n_padded:
+        summary_parts.append(
+            f"{n_padded} neutral argument{'s' if n_padded != 1 else ''} "
+            f"included as padding"
+        )
+    if n_context:
+        summary_parts.append(
+            f"{n_context} finding{'s' if n_context != 1 else ''} shown as context"
+        )
+    selection_summary = ". ".join(summary_parts) + "."
+
+    return {
+        "case_arguments": case_arguments,
+        "context_arguments": context_arguments,
+        "selection_summary": selection_summary,
+    }
+
+
+def compute_overall_credibility(top_arguments: list[dict], peer_groups: dict,
+                                scored_analyses: list[dict]) -> dict:
+    """Honest credibility verdict for the report header.
+
+    Levels:
+      STRONG   — market_n>=30 AND case_count>=3 AND has_dollar_anchor
+                 AND avg_case_strength>4.0
+      MODERATE — market_n>=15 AND case_count>=2
+      WEAK     — anything below
+    """
+    market_n = peer_groups["market"]["n"] if peer_groups.get("market") else 0
+
+    case_supp_all = [
+        a for a in scored_analyses if a.get("score_direction") == "case_supporting"
+    ]
+    counter_all = [
+        a for a in scored_analyses if a.get("score_direction") == "counter_evidence"
+    ]
+    case_count = len(case_supp_all)
+    counter_count = len(counter_all)
+
+    avg_case_strength = (
+        sum(a["strength"] for a in case_supp_all) / len(case_supp_all)
+        if case_supp_all else 0.0
+    )
+
+    has_dollar_anchor = any(
+        abs(float(a["credibility_inputs"].get("dollar_impact", 0) or 0)) > 5000
+        for a in case_supp_all
+    )
+
+    tag_counts: dict[str, int] = {}
+    for a in case_supp_all:
+        t = a["credibility_inputs"].get("narrative_corroboration_tag", "")
+        tag_counts[t] = tag_counts.get(t, 0) + 1
+    has_corroboration = any(c >= 2 for c in tag_counts.values())
+
+    if (market_n >= 30 and case_count >= 3
+            and has_dollar_anchor and avg_case_strength > 4.0):
+        level, color = "strong", "green"
+    elif market_n >= 15 and case_count >= 2:
+        level, color = "moderate", "amber"
+    else:
+        level, color = "weak", "red"
+
+    if level == "strong":
+        parts = [
+            f"{case_count} case-supporting findings backed by a "
+            f"{market_n}-peer market cohort",
+        ]
+        if has_dollar_anchor:
+            parts.append("a concrete dollar anchor")
+        if has_corroboration:
+            parts.append("multiple analyses corroborating the same signal")
+        rationale = "Strong case: " + ", with ".join(parts) + "."
+    elif level == "moderate":
+        parts = [
+            f"{case_count} case-supporting finding{'s' if case_count != 1 else ''} "
+            f"from a {market_n}-peer market cohort"
+        ]
+        if counter_count > 0:
+            parts.append(
+                f"{counter_count} counter-evidence finding"
+                f"{'s' if counter_count != 1 else ''} that should be acknowledged"
+            )
+        rationale = "Moderate case: " + "; ".join(parts) + "."
+    else:
+        parts = []
+        if market_n < 15:
+            parts.append(f"market cohort too small (n={market_n})")
+        if case_count == 0:
+            parts.append("no case-supporting findings")
+        elif case_count < 2:
+            parts.append("only 1 case-supporting finding")
+        rationale = (
+            "Weak case: " + "; ".join(parts) + "."
+            if parts else "Weak case: insufficient signal."
+        )
+
+    warnings: list[str] = []
+    for a in counter_all:
+        tag = a["credibility_inputs"].get("narrative_corroboration_tag", "")
+        short = _TAG_WARNING_TEMPLATES.get(tag, tag.replace("_", " "))
+        warnings.append(f"Counter-evidence ({a['id']}): {short}")
+
+    return {
+        "level": level,
+        "color": color,
+        "rationale": rationale,
+        "warnings": warnings,
+        "details": {
+            "market_n": market_n,
+            "case_count": case_count,
+            "counter_count": counter_count,
+            "avg_case_strength": avg_case_strength,
+            "has_dollar_anchor": has_dollar_anchor,
+            "has_corroboration": has_corroboration,
+        },
+    }
+
+
+def build_report_payload(person_name: str, person_record: dict,
+                         all_records: dict, data: dict) -> dict:
+    """Top-level orchestrator — runs the whole PL-033 pipeline for one person."""
+    peer_groups = resolve_peer_group(person_name, person_record, all_records)
+    structural = compute_site_role_raise_pattern(all_records)
+
+    analyses = [
+        analyze_peer_position(person_name, person_record, all_records, peer_groups, data),
+        analyze_yoy_raise_pattern(person_name, person_record, all_records, peer_groups, data),
+        analyze_cumulative_gap(person_name, person_record, all_records, peer_groups, data),
+        analyze_peer_growth(person_name, person_record, all_records, peer_groups, data),
+        analyze_title_stripped(person_name, person_record, all_records, peer_groups, data),
+        analyze_specific_ask(person_name, person_record, all_records, peer_groups, data),
+    ]
+
+    for a in analyses:
+        sr = score_argument_strength(a, person_record, peer_groups)
+        a["strength"] = sr["raw_score"]
+        a["score_direction"] = sr["direction"]
+        a["score_components"] = sr["components"]
+
+    selection = select_top_arguments(analyses)
+    credibility = compute_overall_credibility(
+        selection["case_arguments"], peer_groups, analyses,
+    )
+
+    return {
+        "person_name": person_name,
+        "person_record": person_record,
+        "peer_groups": peer_groups,
+        "structural_pattern": structural,
+        "all_analyses": analyses,
+        "case_arguments": selection["case_arguments"],
+        "context_arguments": selection["context_arguments"],
+        "selection_summary": selection["selection_summary"],
+        "credibility": credibility,
+        "generated_date": date.today().isoformat(),
     }
 
 
