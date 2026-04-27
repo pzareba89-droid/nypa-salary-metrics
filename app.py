@@ -232,6 +232,416 @@ def _show_fullscreen(title: str, fig: go.Figure, key: str):
 
 
 # ============================================================================
+# PL-033 Report Generator Helpers
+# ============================================================================
+# Tokens stripped when extracting title keywords (seniority/level markers).
+_TITLE_STRIP_TOKENS = {
+    "i", "ii", "iii", "iv", "v",
+    "1", "2", "3", "4", "5",
+    "senior", "sr", "sr.",
+    "junior", "jr", "jr.",
+    "lead", "principal",
+    "associate", "assistant",
+    "level", "trainee", "intern",
+    "&",
+}
+
+
+def _title_keywords(title: str) -> set[str]:
+    """Normalized keywords from a title, stripping seniority/level markers.
+
+    Splits on whitespace, '/' and '-' so compounds like 'Civil/Structural Engineer'
+    contribute both 'civil' and 'structural'. 'O&M' becomes 'o&m' (kept as-is).
+    """
+    if not title:
+        return set()
+    raw = title.lower().replace("/", " ").replace("-", " ")
+    tokens = [t.strip(".,;:()[]") for t in raw.split()]
+    return {t for t in tokens if t and t not in _TITLE_STRIP_TOKENS}
+
+
+_CRAFT_MARKERS = {
+    "apprentice", "journeyperson", "journeyman", "journeywoman",
+    "foreman", "mechanic", "electrician", "operator",
+    "welder", "machinist", "rigger", "laborer",
+    "groundsperson", "groundskeeper",
+    "lineperson", "linesman", "lineman",
+    "trainee",
+    "chief",
+    "technician",
+    "worker", "fabricator", "warehouseperson",
+    "captain", "drafter", "attendant",
+}
+
+_NON_CRAFT_MARKERS = {
+    "engineer", "manager", "director", "supervisor",
+    "coordinator", "specialist", "analyst", "administrator",
+    "officer", "counsel", "president", "vp", "svp",
+    "pilot", "advisor",
+}
+
+_EXEC_CHIEF_PATTERNS = {
+    "chief executive", "chief financial", "chief operating", "chief technology",
+    "chief information", "chief compliance", "chief legal", "chief marketing",
+    "chief human resources", "chief administrative", "chief medical",
+    "chief security", "chief strategy", "chief risk", "chief data",
+    "chief diversity", "chief of staff",
+}
+
+# Context tokens that, alongside 'senior' + 'technician', flip a title to non-craft
+# (e.g. 'Senior Engineering Technician', 'Senior Production Technician').
+_SENIOR_TECH_CONTEXT = {"engineering", "production", "environmental", "system", "project"}
+
+
+def classify_role_type(title: str) -> str:
+    """Classify a title as 'craft' (union/trades) or 'non_craft' (professional/managerial).
+
+    Evaluation order (top to bottom, first match wins):
+      1. Executive 'Chief X' patterns → non_craft (CFO, COO, Chief of Staff, etc.)
+      2. CAD/CADD + Operator → non_craft (drafting/design role, not a trade)
+      3. Reprographics in title → non_craft (office equipment, not a trade)
+      4. Senior + Technician + (engineering/production/environmental/system/project)
+         → non_craft (senior technical-professional, not a journey-level technician)
+      5. 'Trades ' substring → craft (overrides 'specialist' precedence so
+         'Trades Specialist Welder' is craft)
+      6. 'Maintenance Assistant' substring → craft
+      7. 'Service Repair Assistant' substring → craft
+      8. 'License' + 'Operator' → non_craft (license operator track)
+      9. Non-craft token markers (engineer, manager, advisor, …) → non_craft
+     10. Craft token markers (journeyperson, mechanic, technician, worker, …) → craft
+     11. Default → non_craft (the safer org-wide default)
+    """
+    if not title:
+        return "non_craft"
+    raw = title.lower().replace("/", " ").replace("-", " ").replace(",", " ")
+
+    if any(p in raw for p in _EXEC_CHIEF_PATTERNS):
+        return "non_craft"
+
+    tokens = {tok.strip(".:;()[]") for tok in raw.split()}
+
+    if ("cad" in tokens or "cadd" in tokens) and "operator" in tokens:
+        return "non_craft"
+
+    if "reprographics" in tokens:
+        return "non_craft"
+
+    if "senior" in tokens and "technician" in tokens and (tokens & _SENIOR_TECH_CONTEXT):
+        return "non_craft"
+
+    if "trades " in raw:
+        return "craft"
+
+    if "maintenance assistant" in raw:
+        return "craft"
+
+    if "service repair assistant" in raw:
+        return "craft"
+
+    if "license" in tokens and "operator" in tokens:
+        return "non_craft"
+
+    if tokens & _NON_CRAFT_MARKERS:
+        return "non_craft"
+    if "vice" in tokens and "president" in tokens:
+        return "non_craft"
+
+    if tokens & _CRAFT_MARKERS:
+        return "craft"
+
+    return "non_craft"
+
+
+def _peer_member(name: str, rec: dict) -> dict:
+    """Uniform peer-member dict built from a raw record."""
+    yrs = rec["years"]
+    li = len(yrs) - 1
+    return {
+        "full_name": name,
+        "title_latest": rec["titles"][li],
+        "site": (rec.get("site") or "").strip(),
+        "group_latest": rec["groups"][li],
+        "dept_latest": rec["depts"][li],
+        "year_first": yrs[0],
+        "year_latest": yrs[li],
+        "base_first": rec["base"][0],
+        "base_latest": rec["base"][li],
+        "years": yrs,
+        "base_series": rec["base"],
+        "yoy": rec["yoy"],
+        "titles": rec["titles"],
+    }
+
+
+def resolve_peer_group(person_name: str, person_record: dict, all_records: dict) -> dict:
+    """Resolve TWO peer cohorts for a person plus their classified role type.
+
+    LOCAL cohort — 'what HR sees':
+      Same Group + Same Site + Same role_type (craft / non_craft).
+      Cascade: n>=10 → 'Local'; n>=5 → 'Local (small)'; else fall back to
+      Group+role_type org-wide (n>=15) → 'Local (org fallback)'; else low-confidence.
+
+    MARKET cohort — 'what the market sets':
+      Same role_type + at least one shared title keyword, SITE-BLIND, no Group filter
+      (so e.g. 'Engineering Manager' in Managerial counts toward an engineer's market).
+      Cascade: n>=30 → 'Market'; n>=10 → 'Market (smaller)'; else 'Market (low confidence)'.
+
+    Both cohorts exclude the person themselves. Returns:
+      {
+        "local":  {level, n, members, filter_description},
+        "market": {level, n, members, filter_description},
+        "person_role_type": "craft" | "non_craft",
+      }
+    """
+    yrs = person_record["years"]
+    li = len(yrs) - 1
+    person_group = person_record["groups"][li]
+    person_site = (person_record.get("site") or "").strip()
+    person_title = person_record["titles"][li]
+    person_keywords = _title_keywords(person_title)
+    person_role = classify_role_type(person_title)
+
+    local_site_role: list[dict] = []
+    local_group_role_org: list[dict] = []
+    market_role_kw: list[dict] = []
+
+    for name, rec in all_records.items():
+        if name == person_name:
+            continue
+        if not rec.get("years") or not rec.get("groups") or not rec.get("titles"):
+            continue
+        rli = len(rec["years"]) - 1
+        peer_title = rec["titles"][rli]
+        peer_role = classify_role_type(peer_title)
+        if peer_role != person_role:
+            continue
+        peer_group = rec["groups"][rli]
+        peer_site = (rec.get("site") or "").strip()
+        peer_kw = _title_keywords(peer_title)
+        member = _peer_member(name, rec)
+        if peer_group == person_group:
+            local_group_role_org.append(member)
+            if peer_site == person_site:
+                local_site_role.append(member)
+        if person_keywords and peer_kw and (person_keywords & peer_kw):
+            market_role_kw.append(member)
+
+    site_label = person_site or "no site assigned"
+    role_label = "non-craft" if person_role == "non_craft" else "craft"
+
+    # ---- Local cohort cascade ----
+    n_ls = len(local_site_role)
+    n_lo = len(local_group_role_org)
+    if n_ls >= 10:
+        local = {
+            "level": "Local",
+            "n": n_ls,
+            "members": local_site_role,
+            "filter_description": (
+                f"{n_ls} {role_label} peers in {person_group} at {site_label}"
+            ),
+        }
+    elif n_ls >= 5:
+        local = {
+            "level": "Local (small)",
+            "n": n_ls,
+            "members": local_site_role,
+            "filter_description": (
+                f"{n_ls} {role_label} peers in {person_group} at {site_label} "
+                f"(small sample — interpret with caution)"
+            ),
+        }
+    elif n_lo >= 15:
+        local = {
+            "level": "Local (org fallback)",
+            "n": n_lo,
+            "members": local_group_role_org,
+            "filter_description": (
+                f"{n_lo} {role_label} peers in {person_group} org-wide "
+                f"(site-level cohort too small)"
+            ),
+        }
+    else:
+        local = {
+            "level": "Local (low confidence)",
+            "n": max(n_ls, n_lo),
+            "members": local_site_role if n_ls >= n_lo else local_group_role_org,
+            "filter_description": (
+                f"Only {max(n_ls, n_lo)} {role_label} peers available in "
+                f"{person_group} — local cohort unreliable"
+            ),
+        }
+
+    # ---- Market cohort cascade ----
+    n_m = len(market_role_kw)
+    if n_m >= 30:
+        market = {
+            "level": "Market",
+            "n": n_m,
+            "members": market_role_kw,
+            "filter_description": (
+                f"{n_m} {role_label} peers across NYPA whose titles share keywords "
+                f"with '{person_title}' (site-blind, all groups)"
+            ),
+        }
+    elif n_m >= 10:
+        market = {
+            "level": "Market (smaller)",
+            "n": n_m,
+            "members": market_role_kw,
+            "filter_description": (
+                f"{n_m} {role_label} peers across NYPA with overlapping title keywords "
+                f"(smaller-than-ideal sample)"
+            ),
+        }
+    else:
+        market = {
+            "level": "Market (low confidence)",
+            "n": n_m,
+            "members": market_role_kw,
+            "filter_description": (
+                f"Only {n_m} {role_label} peers across NYPA share title keywords with "
+                f"'{person_title}' — market cohort unreliable"
+            ),
+        }
+
+    return {
+        "local": local,
+        "market": market,
+        "person_role_type": person_role,
+    }
+
+
+def compute_site_role_raise_pattern(records: dict, sites: list[str] | None = None,
+                                    role_types: tuple[str, ...] = ("craft", "non_craft")) -> dict:
+    """Pre-computed avg annual base raise % broken down by Site × role_type.
+
+    Each person's role_type is classified from their LATEST title (a stable identity
+    label) and applied to all their year-transition raises (record['yoy'][i] for i>=1).
+    Empty-site records are bucketed under '(no site)'.
+
+    Returns a plot-ready dict:
+      {
+        "sites_ordered":   [site, ...] sorted by total transition count desc,
+        "by_site":         {site: {"all_pct": float, "craft_pct": float|None,
+                                   "non_craft_pct": float|None, "n_craft": int,
+                                   "n_non_craft": int, "transitions_total": int}},
+        "org_wide":        {"all_pct", "craft_pct", "non_craft_pct",
+                            "n_craft", "n_non_craft", "transitions_total"},
+      }
+    """
+    no_site_label = "(no site)"
+    site_rows: dict[str, list[tuple[str, float]]] = {}
+    site_employees: dict[tuple[str, str], set[str]] = {}
+    org_rows: list[tuple[str, float]] = []
+    org_employees: dict[str, set[str]] = {rt: set() for rt in role_types}
+
+    for name, rec in records.items():
+        yrs = rec.get("years") or []
+        yoy = rec.get("yoy") or []
+        titles = rec.get("titles") or []
+        if not yrs or len(yrs) < 2 or not titles:
+            continue
+        role = classify_role_type(titles[-1])
+        if role not in role_types:
+            continue
+        site = (rec.get("site") or "").strip() or no_site_label
+        site_employees.setdefault((site, role), set()).add(name)
+        org_employees[role].add(name)
+        for i in range(1, len(yrs)):
+            v = yoy[i]
+            if v is None:
+                continue
+            site_rows.setdefault(site, []).append((role, float(v)))
+            org_rows.append((role, float(v)))
+
+    def _avg(vals: list[float]) -> float | None:
+        return (sum(vals) / len(vals)) if vals else None
+
+    by_site: dict[str, dict] = {}
+    for site, rows in site_rows.items():
+        all_v = [v for _, v in rows]
+        c_v = [v for r, v in rows if r == "craft"]
+        nc_v = [v for r, v in rows if r == "non_craft"]
+        by_site[site] = {
+            "all_pct": _avg(all_v),
+            "craft_pct": _avg(c_v),
+            "non_craft_pct": _avg(nc_v),
+            "n_craft": len(site_employees.get((site, "craft"), set())),
+            "n_non_craft": len(site_employees.get((site, "non_craft"), set())),
+            "transitions_total": len(rows),
+        }
+
+    sites_ordered = sorted(by_site.keys(),
+                           key=lambda s: -by_site[s]["transitions_total"])
+    if sites:
+        sites_ordered = [s for s in sites_ordered if s in set(sites) | {no_site_label}]
+
+    all_v = [v for _, v in org_rows]
+    c_v = [v for r, v in org_rows if r == "craft"]
+    nc_v = [v for r, v in org_rows if r == "non_craft"]
+    org_wide = {
+        "all_pct": _avg(all_v),
+        "craft_pct": _avg(c_v),
+        "non_craft_pct": _avg(nc_v),
+        "n_craft": len(org_employees.get("craft", set())),
+        "n_non_craft": len(org_employees.get("non_craft", set())),
+        "transitions_total": len(org_rows),
+    }
+
+    return {
+        "sites_ordered": sites_ordered,
+        "by_site": by_site,
+        "org_wide": org_wide,
+    }
+
+
+def resolve_title_similar_peers(person_name: str, person_record: dict, all_records: dict) -> dict:
+    """Same-Group peers whose latest title shares any keyword with the person's latest title.
+
+    Returns the same dict shape as resolve_peer_group. Used by analyses that need a
+    title-stripped (within-role) cohort even when the broader group is the chosen peer set.
+    """
+    yrs = person_record["years"]
+    li = len(yrs) - 1
+    person_group = person_record["groups"][li]
+    person_title = person_record["titles"][li]
+    person_keywords = _title_keywords(person_title)
+
+    title_matched: list[dict] = []
+    for name, rec in all_records.items():
+        if name == person_name:
+            continue
+        if not rec.get("years") or not rec.get("groups") or not rec.get("titles"):
+            continue
+        rli = len(rec["years"]) - 1
+        if rec["groups"][rli] != person_group:
+            continue
+        peer_kw = _title_keywords(rec["titles"][rli])
+        if person_keywords and peer_kw and (person_keywords & peer_kw):
+            title_matched.append(_peer_member(name, rec))
+
+    n = len(title_matched)
+    if n == 0:
+        return {
+            "level": "Title-similar (empty)",
+            "n": 0,
+            "members": [],
+            "filter_description": (
+                f"No same-group peers share keywords with title '{person_title}'"
+            ),
+        }
+    return {
+        "level": "Title-similar",
+        "n": n,
+        "members": title_matched,
+        "filter_description": (
+            f"{n} same-group peers with titles sharing keywords with '{person_title}'"
+        ),
+    }
+
+
+# ============================================================================
 # VIEW: HOME
 # ============================================================================
 def view_home(data: dict):
