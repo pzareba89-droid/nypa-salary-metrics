@@ -447,6 +447,19 @@ def classify_role_type(title: str) -> str:
     return "non_craft"
 
 
+def is_engineering_record(rec: dict) -> bool:
+    """True when a person's title history indicates the engineering family.
+
+    Conservative: requires 'ENGINEER' or 'ENGRG' substring in any title across the
+    record. False for empty title histories. Used by analyze_title_stripped to scope
+    the structural site comparison to engineers when the subject is an engineer —
+    empirically necessary because St. Lawrence engineers (7.30%) outpace White
+    Plains engineers (6.35%), opposite of the non-craft aggregate pattern.
+    """
+    titles = rec.get("titles") or []
+    return any("ENGINEER" in t.upper() or "ENGRG" in t.upper() for t in titles)
+
+
 def _peer_member(name: str, rec: dict) -> dict:
     """Uniform peer-member dict built from a raw record."""
     yrs = rec["years"]
@@ -608,12 +621,18 @@ def resolve_peer_group(person_name: str, person_record: dict, all_records: dict)
 
 
 def compute_site_role_raise_pattern(records: dict, sites: list[str] | None = None,
-                                    role_types: tuple[str, ...] = ("craft", "non_craft")) -> dict:
+                                    role_types: tuple[str, ...] = ("craft", "non_craft"),
+                                    family_filter=None) -> dict:
     """Pre-computed avg annual base raise % broken down by Site × role_type.
 
     Each person's role_type is classified from their LATEST title (a stable identity
     label) and applied to all their year-transition raises (record['yoy'][i] for i>=1).
     Empty-site records are bucketed under '(no site)'.
+
+    `family_filter`: optional callable(record) -> bool. When provided, records where
+    family_filter(rec) is False are excluded — used by analyze_title_stripped to scope
+    the structural pattern to engineering-only (or any other family) when the subject
+    warrants it. Default None preserves backward-compatible org-wide behavior.
 
     Returns a plot-ready dict:
       {
@@ -636,6 +655,8 @@ def compute_site_role_raise_pattern(records: dict, sites: list[str] | None = Non
         yoy = rec.get("yoy") or []
         titles = rec.get("titles") or []
         if not yrs or len(yrs) < 2 or not titles:
+            continue
+        if family_filter is not None and not family_filter(rec):
             continue
         role = classify_role_type(titles[-1])
         if role not in role_types:
@@ -1224,7 +1245,13 @@ def analyze_title_stripped(person_name, person_record, all_records, peer_groups,
     person_raises = [v for v in yoy[1:] if v is not None]
     person_avg_raise = (sum(person_raises) / len(person_raises)) if person_raises else 0.0
 
-    pattern = compute_site_role_raise_pattern(all_records)
+    # Engineering subjects get an engineering-only structural pattern. Empirically
+    # the engineering site rates differ from the non-craft aggregate (St. Lawrence
+    # engineers 7.30% > White Plains engineers 6.35%, opposite of the non-craft
+    # picture) — so the comparison must filter to engineers when the subject is one.
+    is_eng_subject = is_engineering_record(person_record)
+    family_filter = is_engineering_record if is_eng_subject else None
+    pattern = compute_site_role_raise_pattern(all_records, family_filter=family_filter)
     by_site = pattern["by_site"]
     org_wide = pattern["org_wide"]
     role_key = "non_craft_pct" if role == "non_craft" else "craft_pct"
@@ -1248,7 +1275,12 @@ def analyze_title_stripped(person_name, person_record, all_records, peer_groups,
         else None
     )
 
-    role_label = "non-craft" if role == "non_craft" else "craft"
+    if is_eng_subject:
+        role_label = "engineering"
+    elif role == "non_craft":
+        role_label = "non-craft"
+    else:
+        role_label = "craft"
 
     if site_cohort_avg is not None and wp_cohort_avg is not None:
         # Same-sign gaps stack; opposite-sign gaps partially offset.
@@ -1300,7 +1332,10 @@ def analyze_title_stripped(person_name, person_record, all_records, peer_groups,
     elif gap_site_vs_wp is not None and gap_site_vs_wp > 0.3:
         tag = "site_leading"
     else:
-        tag = "site_neutral"
+        # For engineering subjects, the small-gap region is "site_competitive" rather
+        # than the generic "site_neutral" — names the engineer-specific finding that
+        # the site is roughly even with the HQ benchmark.
+        tag = "site_competitive" if is_eng_subject else "site_neutral"
 
     return {
         "id": "title_stripped",
@@ -1320,7 +1355,9 @@ def analyze_title_stripped(person_name, person_record, all_records, peer_groups,
         },
         "narrative": narrative,
         "data_source": (
-            f"compute_site_role_raise_pattern() over all NYPA records, role_type={role}. "
+            f"compute_site_role_raise_pattern() over "
+            f"{'engineering-family records only' if is_eng_subject else 'all NYPA records'}, "
+            f"role_type={role}. "
             f"Person classified by latest title; site avg uses all transitions of all "
             f"role-typed employees at the site."
         ),
@@ -1582,6 +1619,7 @@ _NEUTRAL_TAGS = frozenset({
     "growth_at_norm",
     "at_market",
     "site_neutral",
+    "site_competitive",
     "ask_marginal",
 })
 
