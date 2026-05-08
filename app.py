@@ -111,91 +111,10 @@ def load_data() -> dict[str, Any]:
         return json.load(f)
 
 
-@st.cache_data
-def load_manual_overrides() -> dict:
-    """Load salary overrides for years not yet in nypa_data.json (e.g. 2025).
-    Format: {"salary_overrides": {<name>: {<year_str>: {Year, Base Annualized Salary, ...}}}}.
-    """
-    path = HERE / "manual_overrides.json"
-    if path.exists():
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    return {"salary_overrides": {}}
-
-
-def apply_salary_overrides(rec: dict, overrides: dict) -> dict:
-    """Return a copy of `rec` with override years appended/replaced in the columnar arrays.
-    `overrides` is the per-person dict mapping year-string → row-dict.
-    Used for display only; PL-033 report intentionally still uses the raw record.
-    """
-    if not overrides:
-        return rec
-    new_rec = {k: (list(v) if isinstance(v, list) else v) for k, v in rec.items()}
-    for yr_str, row in overrides.items():
-        yr = int(yr_str)
-        if yr in new_rec.get("years", []):
-            i = new_rec["years"].index(yr)
-            keep = [j for j in range(len(new_rec["years"])) if j != i]
-            for k, v in list(new_rec.items()):
-                if isinstance(v, list) and len(v) == len(rec["years"]):
-                    new_rec[k] = [v[j] for j in keep]
-        prev_base = new_rec["base"][-1] if new_rec.get("base") else None
-        base = float(row.get("Base Annualized Salary", 0))
-        yoy = round((base - prev_base) / prev_base * 1000) / 10 if prev_base else None
-        appenders = {
-            "years": yr,
-            "base": base,
-            "total": float(row.get("Total Compensation", base)),
-            "ot": float(row.get("Overtime Paid", 0)),
-            "add": float(row.get("Additional Earnings", 0)),
-            "titles": row.get("Title", new_rec["titles"][-1] if new_rec.get("titles") else ""),
-            "depts": row.get("Department", new_rec["depts"][-1] if new_rec.get("depts") else ""),
-            "groups": row.get("Group", new_rec["groups"][-1] if new_rec.get("groups") else ""),
-            "yoy": yoy,
-            "pctile": None,
-            "gap_median": None,
-            "gap_mean": None,
-        }
-        for k, v in appenders.items():
-            if k in new_rec and isinstance(new_rec[k], list):
-                new_rec[k].append(v)
-    return new_rec
-
-
 def get_site(name: str, data: dict) -> str:
     """Resolve a person's site from the pre-computed JSON."""
     rec = data["records"].get(name, {})
     return (rec.get("site") or "").strip()
-
-
-# Hardcoded rubric grade for V0.5 — Piotr-only preview ahead of Rubric V1's data-driven mapping.
-PERSONAL_GRADE_OVERRIDES = {
-    "Piotr Zareba": {
-        "career_stream_title": "P5 Civil",
-        "career_stream": "P",
-        "career_level": "P5",
-        "job_family": "Engineering",
-        "job_discipline": "Civil",
-        "geographic_region": "UNY",
-        "band_min_2026": 126000,
-        "band_mid_2026": 158000,
-        "band_max_2026": 190000,
-    },
-}
-
-
-def get_personal_grade(name: str) -> dict | None:
-    return PERSONAL_GRADE_OVERRIDES.get(name)
-
-
-def compute_comp_ratio(salary: float, band_mid: float) -> float | None:
-    return salary / band_mid if band_mid else None
-
-
-def compute_band_position(salary: float, band_min: float, band_max: float) -> float | None:
-    if band_max <= band_min:
-        return None
-    return (salary - band_min) / (band_max - band_min)
 
 
 # ----------------------------------------------------------------------------
@@ -2774,32 +2693,9 @@ def view_individual(data: dict):
     )
 
     people = data["people"]
-    years = list(data["all_years"])
+    years = data["all_years"]
     records = data["records"]
     org_stats = data["org_stats"]
-
-    # Extend the year axis with any manual-override years for the currently-selected
-    # person, so 2025 surfaces in the End-year dropdown and downstream display logic.
-    sel_person = st.session_state.get("ind_person", "")
-    if sel_person:
-        ov_years = [
-            int(y) for y in load_manual_overrides()
-                .get("salary_overrides", {})
-                .get(sel_person, {})
-                .keys()
-        ]
-        years = sorted(set(years) | set(ov_years))
-
-    # When the year axis grows (e.g. just picked someone with a 2025 override) bump
-    # the End-year selection to the new max so the latest year shows by default.
-    new_max = years[-1] if years else None
-    prev_max = st.session_state.get("_ind_years_max")
-    if new_max is not None:
-        if prev_max is not None and new_max > prev_max:
-            st.session_state["ind_ey"] = new_max
-        if "ind_ey" in st.session_state and st.session_state["ind_ey"] not in years:
-            st.session_state["ind_ey"] = new_max
-    st.session_state["_ind_years_max"] = new_max
 
     col_s, col_y1, col_y2, col_site = st.columns([4, 2, 2, 2])
     with col_s:
@@ -2833,11 +2729,6 @@ def view_individual(data: dict):
     if not rec:
         st.warning("No record found.")
         return
-    # Snapshot for PL-033 — analyses run on raw 2017-2024 data so peer comparisons stay aligned.
-    rec_for_report = rec
-    overrides = load_manual_overrides().get("salary_overrides", {}).get(person, {})
-    if overrides:
-        rec = apply_salary_overrides(rec, overrides)
     p_site = get_site(person, data)
     if site_filter and p_site != site_filter:
         st.warning(f"{person} is not in site '{site_filter}' (site: {p_site or 'unknown'}).")
@@ -2956,43 +2847,6 @@ def view_individual(data: dict):
         for color, text in callouts:
             st.markdown(f"<div class='callout' style='border-color:{color};'>{text}</div>",
                         unsafe_allow_html=True)
-
-    grade = get_personal_grade(person)
-    if grade:
-        latest_year = rec_years[-1]
-        current_salary = rec["base"][-1]
-        cr = compute_comp_ratio(current_salary, grade["band_mid_2026"])
-        pos = compute_band_position(
-            current_salary, grade["band_min_2026"], grade["band_max_2026"]
-        )
-        st.markdown("---")
-        st.markdown("### Rubric Comp Ratio (V0.5 Preview)")
-        st.markdown(
-            f"**Career Stream Title:** `{grade['career_stream_title']}` "
-            f"({grade['job_family']} family, {grade['geographic_region']} rates) · "
-            f"anchor year {latest_year}, salary {fmt_dollar(current_salary)}"
-        )
-        cc1, cc2, cc3, cc4 = st.columns(4)
-        cc1.metric(
-            "Comp Ratio", f"{cr:.3f}" if cr is not None else "—",
-            delta=f"{(cr - 1.0) * 100:+.1f}% vs midpoint" if cr is not None else None,
-        )
-        cc2.metric(
-            "Band Position", f"{pos * 100:.1f}%" if pos is not None else "—",
-        )
-        cc3.metric("Band Mid", fmt_dollar(grade["band_mid_2026"]))
-        cc4.metric(
-            "Headroom to Mid",
-            fmt_dollar(grade["band_mid_2026"] - current_salary, signed=True),
-        )
-        st.caption(
-            f"2026 P5 Civil UNY band: {fmt_dollar(grade['band_min_2026'])} (min) / "
-            f"{fmt_dollar(grade['band_mid_2026'])} (mid) / "
-            f"{fmt_dollar(grade['band_max_2026'])} (max). "
-            f"Source: NYPA 2026 Salary Ranges (Comp Site 3.18.26.xlsx). "
-            f"V0.5 preview — hardcoded for {person} only. Generic version in Rubric V1."
-        )
-        st.markdown("---")
 
     # Chart: salary history
     base_series = [rec["base"][rec_years.index(y)] if y in rec_years else None for y in ry]
@@ -3252,7 +3106,7 @@ def view_individual(data: dict):
             st.rerun()
     else:
         with st.spinner("Generating compensation report…"):
-            payload = build_report_payload(person, rec_for_report, records, data)
+            payload = build_report_payload(person, rec, records, data)
         render_compensation_report(payload)
         if st.button("Hide compensation report",
                      key=f"_pl033_hide_btn_{person}"):
