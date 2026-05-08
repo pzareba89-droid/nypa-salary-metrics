@@ -4153,11 +4153,24 @@ def view_org(data: dict):
         )
         cut_key = "all_cohort" if cohort_mode == "All cohort (incl. frozen)" else "raise_recipients"
         transitions = sorted(cohort_data.keys())
+        # PL-073: pick slice matching active filter for each transition; mirrors the
+        # elif chain c6 uses so the chart and card stay in lockstep with the filter.
+        chart_filter = site_f or grp_f or dept_f
         x_labels, means, medians, customdata = [], [], [], []
         for t in transitions:
-            c = cohort_data[t]
+            c_org = cohort_data[t]
+            if site_f:
+                c = c_org.get("by_site", {}).get(site_f)
+            elif grp_f:
+                c = c_org.get("by_group", {}).get(grp_f)
+            elif dept_f:
+                c = c_org.get("by_dept", {}).get(dept_f)
+            else:
+                c = c_org
+            if not c:
+                continue
             cut = c[cut_key]
-            x_labels.append(f"{c['year_from']}→{str(c['year_to'])[-2:]}")
+            x_labels.append(f"{c_org['year_from']}→{str(c_org['year_to'])[-2:]}")
             means.append(cut["mean_pct"])
             medians.append(cut["median_pct"])
             customdata.append([
@@ -4166,37 +4179,46 @@ def view_org(data: dict):
                 cut["median_dollar"],
                 c["raise_recipients"]["pct_of_cohort"],
             ])
-        hover_tpl = (
-            "<b>%{x}</b><br>%{y:.2f}%<br>"
-            "n=%{customdata[0]:,}<br>"
-            "mean $: $%{customdata[1]:,}<br>"
-            "median $: $%{customdata[2]:,}<br>"
-            "%{customdata[3]:.1f}% got a raise"
-            "<extra>%{fullData.name}</extra>"
-        )
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=x_labels, y=means, name="Mean %",
-            marker=dict(color=BLUE),
-            customdata=customdata,
-            hovertemplate=hover_tpl,
-        ))
-        fig.add_trace(go.Bar(
-            x=x_labels, y=medians, name="Median %",
-            marker=dict(color=AMBER),
-            customdata=customdata,
-            hovertemplate=hover_tpl,
-        ))
-        fig.update_layout(barmode="group")
-        apply_layout(fig, height=300, show_legend=True, y_dollars=False)
-        fig.update_yaxes(title="YoY raise %", ticksuffix="%")
-        cut_subtitle = (
-            "All cohort — includes $0 raises (frozen employees pull means down)."
-            if cut_key == "all_cohort" else
-            "Raise recipients only — excludes frozen employees, shows the actual raise distribution."
-        )
-        chart_card("Realized YoY Raise History — Same-Cohort", fig,
-                   key="org-cohort-raises", subtitle=cut_subtitle)
+        if not x_labels:
+            st.info(
+                f"No raise history available for '{chart_filter}' across recorded years."
+            )
+        else:
+            hover_tpl = (
+                "<b>%{x}</b><br>%{y:.2f}%<br>"
+                "n=%{customdata[0]:,}<br>"
+                "mean $: $%{customdata[1]:,}<br>"
+                "median $: $%{customdata[2]:,}<br>"
+                "%{customdata[3]:.1f}% got a raise"
+                "<extra>%{fullData.name}</extra>"
+            )
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=x_labels, y=means, name="Mean %",
+                marker=dict(color=BLUE),
+                customdata=customdata,
+                hovertemplate=hover_tpl,
+            ))
+            fig.add_trace(go.Bar(
+                x=x_labels, y=medians, name="Median %",
+                marker=dict(color=AMBER),
+                customdata=customdata,
+                hovertemplate=hover_tpl,
+            ))
+            fig.update_layout(barmode="group")
+            apply_layout(fig, height=300, show_legend=True, y_dollars=False)
+            fig.update_yaxes(title="YoY raise %", ticksuffix="%")
+            cut_subtitle = (
+                "All cohort — includes $0 raises (frozen employees pull means down)."
+                if cut_key == "all_cohort" else
+                "Raise recipients only — excludes frozen employees, shows the actual raise distribution."
+            )
+            chart_title = (
+                f"Realized YoY Raise History — Same-Cohort — {chart_filter}"
+                if chart_filter
+                else "Realized YoY Raise History — Same-Cohort"
+            )
+            chart_card(chart_title, fig, key="org-cohort-raises", subtitle=cut_subtitle)
 
     # Distribution chart
     col_l, col_r = st.columns(2)
