@@ -4002,6 +4002,13 @@ def view_leaderboard(data: dict):
 # ============================================================================
 # VIEW: ORG SNAPSHOT
 # ============================================================================
+def _clear_org_filters() -> None:
+    # Streamlit forbids assigning to a widget's session_state key after the widget
+    # has rendered in the current run, so the Clear button uses this as on_click.
+    for k in ("org_site", "org_grp", "org_dept"):
+        st.session_state[k] = ""
+
+
 def view_org(data: dict):
     st.markdown("## Org snapshot")
     st.markdown(
@@ -4027,10 +4034,7 @@ def view_org(data: dict):
                               format_func=lambda x: "All departments" if x == "" else x, key="org_dept")
     with col_clear:
         st.markdown("&nbsp;")
-        if st.button("Clear", key="org_clear"):
-            for k in ("org_site", "org_grp", "org_dept"):
-                st.session_state[k] = ""
-            st.rerun()
+        st.button("Clear", key="org_clear", on_click=_clear_org_filters)
 
     filter_label = site_f or grp_f or dept_f
     filter_stats = None
@@ -4091,17 +4095,40 @@ def view_org(data: dict):
                         delta_dir="up")
     with c6:
         prev_year = dist_year - 1
-        realized = data.get("cohort_raises", {}).get(f"{prev_year}_{dist_year}")
-        if realized:
+        yr_pair = data.get("cohort_raises", {}).get(f"{prev_year}_{dist_year}")
+        # PL-072: pick the slice matching the active filter; mirrors the elif chain
+        # used by the rest of view_org's filter handling (one filter at a time).
+        filter_used = site_f or grp_f or dept_f
+        realized = None
+        if yr_pair:
+            if site_f:
+                realized = yr_pair.get("by_site", {}).get(site_f)
+            elif grp_f:
+                realized = yr_pair.get("by_group", {}).get(grp_f)
+            elif dept_f:
+                realized = yr_pair.get("by_dept", {}).get(dept_f)
+            else:
+                realized = yr_pair
+
+        if realized and "all_cohort" in realized:
             ac_ = realized["all_cohort"]
+            title = (
+                f"Realized Raise — {filter_used} ({dist_year})"
+                if filter_used else f"Realized Raise ({dist_year})"
+            )
             metric_card(
-                f"Realized Raise ({dist_year})",
+                title,
                 f"{ac_['mean_pct']:.2f}%",
                 sub=(
                     f"n={ac_['n']:,} · median {ac_['median_pct']:.2f}% · "
                     f"{realized['raise_recipients']['pct_of_cohort']:.0f}% got raise"
                 ),
                 color="coral",
+            )
+        elif filter_used:
+            metric_card(
+                f"Realized Raise — {filter_used} ({dist_year})", "—",
+                sub="Insufficient sample for this slice", color="coral",
             )
         else:
             metric_card(
