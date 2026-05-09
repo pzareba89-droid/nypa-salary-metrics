@@ -3599,6 +3599,14 @@ def lb_compute(sy: int, ey: int, _records_hash: int) -> list[dict]:
     return out
 
 
+def _clear_raise_window_filters() -> None:
+    # Streamlit forbids assigning to a widget's session_state key after the widget
+    # has rendered in the current run, so the Clear button uses this as on_click.
+    for k in ("lbw_year", "lbw_site", "lbw_grp", "lbw_dept", "lbw_min", "lbw_max"):
+        if k in st.session_state:
+            del st.session_state[k]
+
+
 def view_leaderboard(data: dict):
     st.markdown("## Leaderboard")
     st.markdown(
@@ -3607,6 +3615,14 @@ def view_leaderboard(data: dict):
         unsafe_allow_html=True,
     )
 
+    tab_top, tab_window = st.tabs(["Top Performers", "Find by Raise Window"])
+    with tab_top:
+        _view_leaderboard_top_performers(data)
+    with tab_window:
+        _view_leaderboard_raise_window(data)
+
+
+def _view_leaderboard_top_performers(data: dict):
     years = data["all_years"]
     people = data["people"]
     records = data["records"]
@@ -3999,6 +4015,145 @@ def view_leaderboard(data: dict):
     )
 
 
+def _view_leaderboard_raise_window(data: dict):
+    years = data["all_years"]
+    records = data["records"]
+
+    year_pairs = [(years[i], years[i + 1]) for i in range(len(years) - 1)]
+
+    col_y, col_s, col_g, col_d, col_min, col_max, col_clear = st.columns(
+        [1.6, 1.2, 1.2, 1.6, 0.9, 0.9, 0.7]
+    )
+    with col_y:
+        sel_pair = st.selectbox(
+            "Year transition",
+            year_pairs,
+            index=len(year_pairs) - 1,
+            format_func=lambda p: f"{p[0]} → {p[1]}",
+            key="lbw_year",
+        )
+    with col_s:
+        site_f = st.selectbox(
+            "Site filter", [""] + data.get("sites", []),
+            format_func=lambda x: "All sites" if x == "" else x, key="lbw_site",
+        )
+    with col_g:
+        grp_f = st.selectbox(
+            "Group filter", [""] + data["groups"],
+            format_func=lambda x: "All groups" if x == "" else x, key="lbw_grp",
+        )
+    with col_d:
+        dept_f = st.selectbox(
+            "Dept filter", [""] + data["top_depts"],
+            format_func=lambda x: "All departments" if x == "" else x, key="lbw_dept",
+        )
+    with col_min:
+        min_pct = st.number_input(
+            "Min raise %", value=0.0, step=0.1, format="%.1f", key="lbw_min",
+        )
+    with col_max:
+        max_pct = st.number_input(
+            "Max raise %", value=100.0, step=0.1, format="%.1f", key="lbw_max",
+        )
+    with col_clear:
+        st.markdown("&nbsp;")
+        st.button("Clear", key="lbw_clear", on_click=_clear_raise_window_filters)
+
+    if max_pct < min_pct:
+        st.warning("Max raise % must be greater than or equal to min raise %.")
+        return
+
+    y1, y2 = sel_pair
+
+    eligible = 0
+    rows = []
+    for name, rec in records.items():
+        rec_years = rec.get("years", [])
+        if y1 not in rec_years or y2 not in rec_years:
+            continue
+        i1 = rec_years.index(y1)
+        i2 = rec_years.index(y2)
+        prev_base = rec["base"][i1]
+        curr_base = rec["base"][i2]
+        if not prev_base or prev_base <= 0 or not curr_base:
+            continue
+        if site_f and (rec.get("site") or "") != site_f:
+            continue
+        if grp_f and rec["groups"][i2] != grp_f:
+            continue
+        if dept_f and rec["depts"][i2] != dept_f:
+            continue
+        # Past all non-raise filters → counts toward the eligible denominator.
+        eligible += 1
+        raise_pct = (curr_base - prev_base) / prev_base * 100
+        if raise_pct < min_pct or raise_pct > max_pct:
+            continue
+        title_changed = (
+            (rec["titles"][i1] or "").strip().lower()
+            != (rec["titles"][i2] or "").strip().lower()
+        )
+        rows.append({
+            "Name": name,
+            "Title": rec["titles"][i2],
+            "Site": rec.get("site") or "—",
+            "Group": rec["groups"][i2],
+            "Dept": rec["depts"][i2],
+            "Title changed": "Yes" if title_changed else "No",
+            "Prev salary": prev_base,
+            "New salary": curr_base,
+            "Raise %": raise_pct,
+        })
+
+    rows.sort(key=lambda r: r["Raise %"], reverse=True)
+
+    matched = len(rows)
+    match_pct = (matched / eligible * 100) if eligible else 0.0
+    filter_label = site_f or grp_f or dept_f
+    where = f"at {filter_label}" if filter_label else "org-wide"
+
+    if not rows:
+        st.info(
+            f"{matched:,} of {eligible:,} ({match_pct:.1f}%) match. "
+            "Try widening the raise window or clearing site/group/dept filters."
+        )
+        return
+
+    st.markdown(
+        f"**{matched:,}** of {eligible:,} ({match_pct:.1f}%) {where} "
+        f"had raises between {min_pct:.1f}% and {max_pct:.1f}% in {y1}→{y2}"
+    )
+    st.caption("Click a row to open that person's Individual Profile.")
+
+    df = pd.DataFrame(rows)
+    event = st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Prev salary": st.column_config.NumberColumn(format="$%d"),
+            "New salary": st.column_config.NumberColumn(format="$%d"),
+            "Raise %": st.column_config.NumberColumn(format="%.2f%%"),
+            "Title changed": st.column_config.TextColumn(
+                help="Title differed between the year_from and year_to rows (case-insensitive).",
+            ),
+        },
+        height=440,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="lbw_table",
+    )
+    sel_rows = event.selection.rows
+    if sel_rows and 0 <= sel_rows[0] < len(df):
+        selected_name = df.iloc[sel_rows[0]]["Name"]
+        st.session_state["_nav_redirect"] = "Individual profile"
+        st.session_state["ind_person"] = selected_name
+        # Clear the dataframe's stored selection so returning to this tab later
+        # doesn't auto-fire the redirect on the same stale selection.
+        if "lbw_table" in st.session_state:
+            del st.session_state["lbw_table"]
+        st.rerun()
+
+
 # ============================================================================
 # VIEW: ORG SNAPSHOT
 # ============================================================================
@@ -4323,6 +4478,14 @@ def view_org(data: dict):
 # ============================================================================
 def main():
     data = load_data()
+
+    # Apply pending navigation redirects (e.g. row clicks on the Leaderboard
+    # raise-window table) before the sidebar radio renders. Streamlit forbids
+    # writing to a widget-bound key after the widget has rendered, so the
+    # redirect target is parked on a non-widget key and consumed here.
+    pending_nav = st.session_state.pop("_nav_redirect", None)
+    if pending_nav:
+        st.session_state["nav"] = pending_nav
 
     with st.sidebar:
         st.markdown(
