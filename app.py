@@ -4152,6 +4152,14 @@ def _view_leaderboard_raise_window(data: dict):
         f"**{matched:,}** of {eligible:,} ({match_pct:.1f}%) {where} "
         f"had raises between {min_pct:.1f}% and {max_pct:.1f}% in {y1}→{y2}"
     )
+    with_change = sum(1 for r in rows if r["Title changed"] == "Yes")
+    without_change = matched - with_change
+    pct_with = with_change / matched * 100
+    pct_without = without_change / matched * 100
+    st.markdown(
+        f"Of those: **{with_change:,}** ({pct_with:.1f}%) had a title change "
+        f"· {without_change:,} ({pct_without:.1f}%) did not"
+    )
     st.caption("Click a row to open that person's Individual Profile.")
 
     df = pd.DataFrame(rows)
