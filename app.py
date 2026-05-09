@@ -3955,6 +3955,7 @@ def _view_leaderboard_top_performers(data: dict):
 
     # Full table
     st.markdown("#### Full leaderboard")
+    st.caption("Click a row to open that person's Individual Profile.")
     table_rows = []
     for d in ranked:
         table_rows.append({
@@ -3976,7 +3977,7 @@ def _view_leaderboard_top_performers(data: dict):
             "Freezes": d["fr"],
         })
     df = pd.DataFrame(table_rows)
-    st.dataframe(
+    event = st.dataframe(
         df,
         use_container_width=True,
         hide_index=True,
@@ -4012,7 +4013,20 @@ def _view_leaderboard_top_performers(data: dict):
             ),
         },
         height=440,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="lb_table",
     )
+    sel_rows = event.selection.rows
+    if sel_rows and 0 <= sel_rows[0] < len(df):
+        selected_name = df.iloc[sel_rows[0]]["Name"]
+        st.session_state["_nav_redirect"] = "Individual profile"
+        st.session_state["ind_person"] = selected_name
+        # Clear the dataframe's stored selection so returning to this tab later
+        # doesn't auto-fire the redirect on the same stale selection.
+        if "lb_table" in st.session_state:
+            del st.session_state["lb_table"]
+        st.rerun()
 
 
 def _view_leaderboard_raise_window(data: dict):
