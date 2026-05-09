@@ -3146,6 +3146,15 @@ def cmp_metrics(rec, sy, ey):
     return {"tg": tg, "ca": ca, "fy": fy, "ly": ly, "bs": bs, "be": be, "status": st_["status"]}
 
 
+def _comparison_to_profile(name: str) -> None:
+    # on_click callback: redirect to Individual Profile for the clicked pill.
+    # Setting widget keys from a callback is allowed because callbacks run
+    # before any widget renders on the next script run. cmp_sel is left intact
+    # so navigating back to Comparison restores the prior selection.
+    st.session_state["_nav_redirect"] = "Individual profile"
+    st.session_state["ind_person"] = name
+
+
 def view_comparison(data: dict):
     st.markdown("## Comparison")
     st.markdown(
@@ -3191,7 +3200,7 @@ def view_comparison(data: dict):
 
     selected = st.session_state.cmp_sel
 
-    # Pill display + remove
+    # Pill display + remove + open-profile
     if selected:
         cols = st.columns(len(selected) + 1)
         for i, name in enumerate(selected):
@@ -3204,6 +3213,13 @@ def view_comparison(data: dict):
                     f"<div style='height:4px;background:{color};border-radius:2px;"
                     f"margin-top:-10px;'></div>",
                     unsafe_allow_html=True,
+                )
+                st.button(
+                    "→ profile",
+                    key=f"to-prof-{i}",
+                    on_click=_comparison_to_profile,
+                    args=(name,),
+                    help="Open this person's Individual Profile",
                 )
     if len(selected) < 1:
         st.info("Search and add 2–6 people above to compare.")
