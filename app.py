@@ -2684,6 +2684,49 @@ def view_home(data: dict):
 # ============================================================================
 # VIEW: INDIVIDUAL PROFILE
 # ============================================================================
+def _company_avg_raise_pct(
+    cohort_raises: dict, start_y: int, end_y: int, compare_filter: str
+) -> float | None:
+    # PL-077 (amend): arithmetic mean of raise_recipients.mean_pct across the
+    # [start_y, end_y) transitions. raise_recipients excludes $0 raises (frozen
+    # employees) so the benchmark matches "what raises actually were" rather
+    # than "what was distributed across everyone". compare_filter empty ->
+    # org-wide; otherwise the by_site slice.
+    pcts = []
+    for y in range(start_y, end_y):
+        slice_data = cohort_raises.get(f"{y}_{y + 1}")
+        if not slice_data:
+            continue
+        if compare_filter:
+            slice_data = slice_data.get("by_site", {}).get(compare_filter)
+            if not slice_data:
+                continue
+        pcts.append(slice_data["raise_recipients"]["mean_pct"])
+    if not pcts:
+        return None
+    return sum(pcts) / len(pcts)
+
+
+def _personal_avg_raise_pct(rec: dict, start_y: int, end_y: int) -> float | None:
+    # PL-077 (amend): arithmetic mean of the person's yoy[i] for consecutive
+    # year transitions in (start_y, end_y]. Apples-to-apples with the company-
+    # side arithmetic mean above.
+    rec_years = rec.get("years", [])
+    yoys = []
+    for y in range(start_y + 1, end_y + 1):
+        if y not in rec_years:
+            continue
+        i = rec_years.index(y)
+        if i == 0 or rec_years[i - 1] != y - 1:
+            continue
+        v = rec["yoy"][i]
+        if v is not None:
+            yoys.append(v)
+    if not yoys:
+        return None
+    return sum(yoys) / len(yoys)
+
+
 def view_individual(data: dict):
     st.markdown("## Individual profile")
     st.markdown(
@@ -2785,7 +2828,20 @@ def view_individual(data: dict):
         sub = f"peak: {fmt_dollar(max_ot)}" if max_ot else "none on record"
         metric_card("Avg OT / yr", fmt_dollar(avg_ot or 0), sub=sub, color="teal")
 
-    c1, c2, c3, c4 = st.columns(4)
+    # PL-077 (amend): dedicated comparison-site selector for the company-avg
+    # benchmark in c5 below + the YoY chart line. Decoupled from the page
+    # Site filter, which keeps its original informational role ("warn if person
+    # isn't in the selected site").
+    col_cmp, _col_pad = st.columns([2, 4])
+    with col_cmp:
+        compare_against = st.selectbox(
+            "Compare against",
+            options=[""] + data.get("sites", []),
+            format_func=lambda x: "All sites (Company avg)" if x == "" else x,
+            key="ind_compare_against",
+        )
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         gm_org = be - gap_med if gap_med is not None else None
         metric_card(f"vs org median ({ly})", fmt_dollar(gap_med, signed=True) if gap_med is not None else "—",
@@ -2813,6 +2869,33 @@ def view_individual(data: dict):
         metric_card("Percentile trend",
                     f"{'+' if (delta_pct or 0) >= 0 else ''}{delta_pct}pts" if delta_pct is not None else "—",
                     sub=f"since {fy}", color="amber")
+    with c5:
+        # PL-077 (amend): arithmetic mean of raise_recipients raises across
+        # the selected year range, scoped by the Compare-against dropdown.
+        # Apples-to-apples with the personal arithmetic mean over the same
+        # year transitions.
+        co_avg = _company_avg_raise_pct(
+            data.get("cohort_raises", {}), fy, ly, compare_against
+        )
+        you_avg = _personal_avg_raise_pct(rec, fy, ly)
+        avg_card_label = (
+            f"{compare_against} avg raise % ({fy}-{ly})" if compare_against
+            else f"Company avg raise % ({fy}-{ly})"
+        )
+        if co_avg is None:
+            metric_card(avg_card_label, "—",
+                        sub="Insufficient cohort data", color="teal")
+        elif you_avg is not None:
+            delta_pp = you_avg - co_avg
+            metric_card(
+                avg_card_label, f"{co_avg:.2f}%",
+                sub=f"vs your {you_avg:.2f}%", color="teal",
+                delta=f"{delta_pp:+.2f}pp",
+                delta_dir="up" if delta_pp >= 0 else "dn",
+            )
+        else:
+            metric_card(avg_card_label, f"{co_avg:.2f}%",
+                        sub="Personal avg n/a", color="teal")
 
     # Career callouts
     callouts = []
@@ -2967,15 +3050,40 @@ def view_individual(data: dict):
                 colors.append(rgba("#E24B4A", 0.67))
             else:
                 colors.append(rgba(ac, 0.73))
-        labels = [fmt_pct(p, signed=True) if p is not None else "" for p in pct]
+        # PL-077 (amend): personal bars now show raise % (was $); the absolute
+        # $ change becomes the bar text label so it stays visible. Single % axis
+        # (no more dual scale) makes the personal-vs-benchmark comparison direct.
+        dollar_labels = [fmt_dollar(d, signed=True) if d is not None else "" for d in dollars]
         fig = go.Figure()
         fig.add_trace(go.Bar(
-            x=yy, y=dollars, marker=dict(color=colors),
-            text=labels, textposition="outside", textfont=dict(size=10),
-            hovertemplate="<b>%{x}</b><br>%{text}<br>%{y:$,.0f}<extra></extra>",
+            x=yy, y=pct, name="You",
+            marker=dict(color=colors),
+            text=dollar_labels, textposition="outside", textfont=dict(size=10),
+            hovertemplate="<b>%{x}</b><br>You: %{y:.2f}%<br>%{text}<extra></extra>",
         ))
-        apply_layout(fig, height=260)
-        chart_card("Year-over-year change ($ and %)", fig, key="ind-yoy")
+        # Company-avg overlay on the SAME % axis. Reads raise_recipients (not
+        # all_cohort) so frozen-employee zeroes don't drag the benchmark.
+        chart_cohort_raises = data.get("cohort_raises", {})
+        co_pcts = []
+        for y in yy:
+            slice_data = chart_cohort_raises.get(f"{y - 1}_{y}")
+            if compare_against and slice_data:
+                slice_data = slice_data.get("by_site", {}).get(compare_against)
+            co_pcts.append(
+                slice_data["raise_recipients"]["mean_pct"] if slice_data else None
+            )
+        co_label = f"{compare_against} avg" if compare_against else "Company avg"
+        fig.add_trace(go.Scatter(
+            x=yy, y=co_pcts, name=co_label,
+            mode="lines+markers",
+            line=dict(color=AMBER, width=2, dash="dash"),
+            marker=dict(color=AMBER, size=6),
+            connectgaps=False,
+            hovertemplate="<b>%{x}</b><br>%{fullData.name}: %{y:.2f}%<extra></extra>",
+        ))
+        apply_layout(fig, height=260, show_legend=True, y_dollars=False)
+        fig.update_yaxes(title="Raise %", ticksuffix="%")
+        chart_card("Year-over-year raise % — you vs benchmark", fig, key="ind-yoy")
 
         cohort_data = data.get("cohort_raises", {})
         ctx = None
