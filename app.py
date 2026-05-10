@@ -3050,16 +3050,21 @@ def view_individual(data: dict):
                 colors.append(rgba("#E24B4A", 0.67))
             else:
                 colors.append(rgba(ac, 0.73))
-        # PL-077 (amend): personal bars now show raise % (was $); the absolute
-        # $ change becomes the bar text label so it stays visible. Single % axis
-        # (no more dual scale) makes the personal-vs-benchmark comparison direct.
-        dollar_labels = [fmt_dollar(d, signed=True) if d is not None else "" for d in dollars]
+        # PL-077 (amend): personal bars show raise % (was $); single % axis.
+        # PL-084: bar text labels match the bar height (% instead of $); $ moves
+        # to hover via customdata so the dollar context is still discoverable.
+        pct_labels = [f"{p:+.1f}%" if p is not None else "" for p in pct]
+        bar_customdata = [[d if d is not None else 0] for d in dollars]
         fig = go.Figure()
         fig.add_trace(go.Bar(
             x=yy, y=pct, name="You",
             marker=dict(color=colors),
-            text=dollar_labels, textposition="outside", textfont=dict(size=10),
-            hovertemplate="<b>%{x}</b><br>You: %{y:.2f}%<br>%{text}<extra></extra>",
+            text=pct_labels, textposition="outside", textfont=dict(size=10),
+            customdata=bar_customdata,
+            hovertemplate=(
+                "<b>%{x}</b><br>Raise: %{y:+.2f}%<br>"
+                "$ change: $%{customdata[0]:,}<extra>You</extra>"
+            ),
         ))
         # Company-avg overlay on the SAME % axis. Reads raise_recipients (not
         # all_cohort) so frozen-employee zeroes don't drag the benchmark.
@@ -3073,9 +3078,14 @@ def view_individual(data: dict):
                 slice_data["raise_recipients"]["mean_pct"] if slice_data else None
             )
         co_label = f"{compare_against} avg" if compare_against else "Company avg"
+        # PL-084: line points show their % values inline (was hover-only) so
+        # the comparison values are legible without hovering.
+        co_text = [f"{v:.1f}%" if v is not None else "" for v in co_pcts]
         fig.add_trace(go.Scatter(
             x=yy, y=co_pcts, name=co_label,
-            mode="lines+markers",
+            mode="lines+markers+text",
+            text=co_text, textposition="bottom center",
+            textfont=dict(size=9, color=AMBER),
             line=dict(color=AMBER, width=2, dash="dash"),
             marker=dict(color=AMBER, size=6),
             connectgaps=False,
