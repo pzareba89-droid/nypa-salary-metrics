@@ -3127,7 +3127,10 @@ def view_individual(data: dict):
                     person_pct = rec["yoy"][idx_]
                     trans = cohort_data.get(f"{y_ctx - 1}_{y_ctx}")
                     if person_pct is not None and trans:
-                        ctx = (y_ctx, person_pct, trans["all_cohort"]["mean_pct"])
+                        # PL-087: read cut_key so the verdict benchmark matches
+                        # the chart's amber line (was hard-coded all_cohort,
+                        # which mismatched the raise_recipients chart line).
+                        ctx = (y_ctx, person_pct, trans[cut_key]["mean_pct"])
                         break
         if ctx:
             y_ctx, person_pct, org_pct = ctx
