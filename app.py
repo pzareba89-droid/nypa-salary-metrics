@@ -2577,6 +2577,22 @@ def render_compensation_report(payload: dict) -> None:
                     st.dataframe(df_s, hide_index=True, use_container_width=True)
 
 
+def _methodology_footer() -> None:
+    # PL-090: one-line source/definition footer shared by Org Overview and
+    # Individual Profile so anyone (user, manager, HR) sees provenance without
+    # digging. Same markup on both views.
+    st.markdown(
+        "<div style='font-size:11px;color:#888;margin-top:24px;"
+        "padding-top:12px;border-top:0.5px solid #ddd;'>"
+        "Source: <a href='https://data.ny.gov' style='color:#888;'>data.ny.gov</a> · "
+        "Raise % = (year_n base salary − year_{n-1} base salary) / year_{n-1} base salary · "
+        "n=4,318 employees · 2017-2024 · "
+        "Excludes overtime and additional earnings."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 # ============================================================================
 # VIEW: HOME
 # ============================================================================
@@ -3256,6 +3272,8 @@ def view_individual(data: dict):
                      key=f"_pl033_hide_btn_{person}"):
             st.session_state[show_key] = False
             st.rerun()
+
+    _methodology_footer()
 
 
 # ============================================================================
@@ -4525,6 +4543,26 @@ def view_org(data: dict):
             "Yearly raises (merit + promotions combined) vs stated merit "
             "budget. Sites: Org-wide, White Plains, St. Lawrence."
         )
+        # PL-090: user-adjustable merit-budget band bounds (replaces PL-088's
+        # hard-coded 3-4%). Sits directly above the cohort-cut radio.
+        col_lo, col_hi, _merit_pad = st.columns([1, 1, 4])
+        with col_lo:
+            merit_lo = st.number_input(
+                "Stated merit budget lo %",
+                min_value=0.0, max_value=15.0, value=3.0, step=0.5,
+                key="org_merit_lo",
+                help="Lower bound of the 'stated merit budget' band. Adjust to match what HR cites.",
+            )
+        with col_hi:
+            merit_hi = st.number_input(
+                "Stated merit budget hi %",
+                min_value=0.0, max_value=15.0, value=4.0, step=0.5,
+                key="org_merit_hi",
+                help="Upper bound of the band.",
+            )
+        if merit_lo >= merit_hi:
+            st.warning("Merit budget lo must be less than hi. Using lo=3, hi=4.")
+            merit_lo, merit_hi = 3.0, 4.0
         merit_mode = st.radio(
             "Cohort cut",
             ["All cohort (incl. frozen)", "Raise recipients only"],
@@ -4582,12 +4620,11 @@ def view_org(data: dict):
             marker=dict(color=PURPLE, size=7, symbol="square"),
             connectgaps=False, hovertemplate=merit_hover,
         ))
-        # Stated merit budget band — hard-coded 3-4% for PL-088; PL-090 makes
-        # it user-adjustable.
+        # Stated merit budget band — bounds from the PL-090 inputs above.
         fig.add_hrect(
-            y0=3, y1=4, fillcolor="#F1EFE8", opacity=0.5,
+            y0=merit_lo, y1=merit_hi, fillcolor="#F1EFE8", opacity=0.5,
             line_width=0.5, line_dash="dash", line_color="#B4B2A9",
-            annotation_text='"Stated merit budget" 3-4%',
+            annotation_text=f'"Stated merit budget" {merit_lo:.1f}-{merit_hi:.1f}%',
             annotation_position="top left",
         )
         apply_layout(fig, height=340, show_legend=True, y_dollars=False)
@@ -4791,6 +4828,8 @@ def view_org(data: dict):
         },
         height=420,
     )
+
+    _methodology_footer()
 
 
 # ============================================================================
