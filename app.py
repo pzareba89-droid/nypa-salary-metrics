@@ -4513,6 +4513,104 @@ def view_org(data: dict):
                 sub="No prior year for comparison", color="coral",
             )
 
+    # PL-088: "Merit Budget vs Reality" hero chart for the raise-meeting case.
+    # Three site lines (Org / White Plains / St. Lawrence) vs a stated merit
+    # budget band. Sits above the existing YoY history. Default cohort cut is
+    # "All cohort" (incl. frozen $0 raises) because the narrative is "what did
+    # the AVERAGE employee get" — intentionally opposite of Individual Profile.
+    merit_cohort_data = data.get("cohort_raises", {})
+    if merit_cohort_data:
+        st.markdown("## Yearly raises vs stated merit budget")
+        st.caption(
+            "Yearly raises (merit + promotions combined) vs stated merit "
+            "budget. Sites: Org-wide, White Plains, St. Lawrence."
+        )
+        merit_mode = st.radio(
+            "Cohort cut",
+            ["All cohort (incl. frozen)", "Raise recipients only"],
+            horizontal=True,
+            index=0,
+            key="org_merit_chart_mode",
+            help=(
+                "All cohort: average raise across everyone, including $0 "
+                "frozen employees. Raise recipients only: excludes $0 raises, "
+                "shows the actual raise distribution among those who got one."
+            ),
+        )
+        merit_cut = "all_cohort" if merit_mode == "All cohort (incl. frozen)" else "raise_recipients"
+
+        merit_transitions = sorted(merit_cohort_data.keys())
+        x_labels = []
+        org_means, wp_means, sl_means = [], [], []
+        org_n, wp_n, sl_n = [], [], []
+        for t in merit_transitions:
+            c = merit_cohort_data[t]
+            cut_data = c[merit_cut]
+            x_labels.append(f"{c['year_from']}→{str(c['year_to'])[-2:]}")
+            org_means.append(cut_data["mean_pct"])
+            org_n.append(cut_data["n"])
+            wp_slice = c.get("by_site", {}).get("White Plains")
+            sl_slice = c.get("by_site", {}).get("St. Lawrence")
+            wp_means.append(wp_slice[merit_cut]["mean_pct"] if wp_slice else None)
+            wp_n.append(wp_slice[merit_cut]["n"] if wp_slice else 0)
+            sl_means.append(sl_slice[merit_cut]["mean_pct"] if sl_slice else None)
+            sl_n.append(sl_slice[merit_cut]["n"] if sl_slice else 0)
+
+        merit_hover = (
+            "<b>%{x}</b><br>%{y:.2f}%<br>n=%{customdata[0]:,}"
+            "<extra>%{fullData.name}</extra>"
+        )
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=x_labels, y=org_means, name="Org-wide",
+            mode="lines+markers", customdata=[[n] for n in org_n],
+            line=dict(color=BLUE, width=2.5),
+            marker=dict(color=BLUE, size=7, symbol="circle"),
+            connectgaps=False, hovertemplate=merit_hover,
+        ))
+        fig.add_trace(go.Scatter(
+            x=x_labels, y=wp_means, name="White Plains",
+            mode="lines+markers", customdata=[[n] for n in wp_n],
+            line=dict(color=RUST, width=2.5, dash="dash"),
+            marker=dict(color=RUST, size=8, symbol="triangle-up"),
+            connectgaps=False, hovertemplate=merit_hover,
+        ))
+        fig.add_trace(go.Scatter(
+            x=x_labels, y=sl_means, name="St. Lawrence",
+            mode="lines+markers", customdata=[[n] for n in sl_n],
+            line=dict(color=PURPLE, width=2.5, dash="dot"),
+            marker=dict(color=PURPLE, size=7, symbol="square"),
+            connectgaps=False, hovertemplate=merit_hover,
+        ))
+        # Stated merit budget band — hard-coded 3-4% for PL-088; PL-090 makes
+        # it user-adjustable.
+        fig.add_hrect(
+            y0=3, y1=4, fillcolor="#F1EFE8", opacity=0.5,
+            line_width=0.5, line_dash="dash", line_color="#B4B2A9",
+            annotation_text='"Stated merit budget" 3-4%',
+            annotation_position="top left",
+        )
+        apply_layout(fig, height=340, show_legend=True, y_dollars=False)
+        merit_vals = [v for v in org_means + wp_means + sl_means if v is not None]
+        merit_ymax = (max(merit_vals) + 2) if merit_vals else 12
+        fig.update_yaxes(title="Average yearly raise %", ticksuffix="%",
+                         range=[0, merit_ymax])
+        chart_card("Yearly raises vs stated merit budget", fig,
+                   key="org-merit-vs-reality")
+        # Caption below — biggest WP-vs-SL gap year, skipping the COVID
+        # 2019→20 outlier so it doesn't dominate the highlight.
+        merit_spreads = [
+            (x, wp, sl)
+            for x, wp, sl in zip(x_labels, wp_means, sl_means)
+            if wp is not None and sl is not None and x != "2019→20"
+        ]
+        if merit_spreads:
+            gap_x, gap_wp, gap_sl = max(merit_spreads, key=lambda p: p[1] - p[2])
+            st.caption(
+                f"Biggest WP-vs-SL gap: {gap_x} "
+                f"(WP avg {gap_wp:.1f}% vs SL avg {gap_sl:.1f}%)."
+            )
+
     # Realized YoY raise history (same-cohort)
     cohort_data = data.get("cohort_raises", {})
     if cohort_data:
