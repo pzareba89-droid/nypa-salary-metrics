@@ -2685,13 +2685,17 @@ def view_home(data: dict):
 # VIEW: INDIVIDUAL PROFILE
 # ============================================================================
 def _company_avg_raise_pct(
-    cohort_raises: dict, start_y: int, end_y: int, compare_filter: str
+    cohort_raises: dict,
+    start_y: int,
+    end_y: int,
+    compare_filter: str,
+    cut_key: str = "raise_recipients",
 ) -> float | None:
-    # PL-077 (amend): arithmetic mean of raise_recipients.mean_pct across the
-    # [start_y, end_y) transitions. raise_recipients excludes $0 raises (frozen
-    # employees) so the benchmark matches "what raises actually were" rather
-    # than "what was distributed across everyone". compare_filter empty ->
-    # org-wide; otherwise the by_site slice.
+    # PL-077 (amend): arithmetic mean of <cut>.mean_pct across the
+    # [start_y, end_y) transitions. PL-085: cut_key routes to either
+    # "raise_recipients" (default, excludes $0/frozen) or "all_cohort"
+    # (includes frozen). Default preserves PL-077 baseline behavior.
+    # compare_filter empty -> org-wide; otherwise the by_site slice.
     pcts = []
     for y in range(start_y, end_y):
         slice_data = cohort_raises.get(f"{y}_{y + 1}")
@@ -2701,7 +2705,7 @@ def _company_avg_raise_pct(
             slice_data = slice_data.get("by_site", {}).get(compare_filter)
             if not slice_data:
                 continue
-        pcts.append(slice_data["raise_recipients"]["mean_pct"])
+        pcts.append(slice_data[cut_key]["mean_pct"])
     if not pcts:
         return None
     return sum(pcts) / len(pcts)
@@ -2832,7 +2836,11 @@ def view_individual(data: dict):
     # benchmark in c5 below + the YoY chart line. Decoupled from the page
     # Site filter, which keeps its original informational role ("warn if person
     # isn't in the selected site").
-    col_cmp, _col_pad = st.columns([2, 4])
+    # PL-085: adds a sibling "Cohort cut" radio mirroring Org Overview's
+    # org_cohort_mode toggle. Drives metric card, chart line, and verdict block
+    # in lockstep. Default "Raise recipients only" preserves PL-077/PL-084
+    # baseline math.
+    col_cmp, col_cut, _col_pad = st.columns([2, 2, 2])
     with col_cmp:
         compare_against = st.selectbox(
             "Compare against",
@@ -2840,6 +2848,20 @@ def view_individual(data: dict):
             format_func=lambda x: "All sites (Company avg)" if x == "" else x,
             key="ind_compare_against",
         )
+    with col_cut:
+        cohort_mode = st.radio(
+            "Cohort cut",
+            ["All cohort (incl. frozen)", "Raise recipients only"],
+            horizontal=True,
+            index=1,
+            key="ind_cohort_mode",
+            help=(
+                "All cohort: includes employees with $0 raises (frozen). "
+                "Raise recipients only: excludes $0 raises. "
+                "Same toggle as Org Overview."
+            ),
+        )
+    cut_key = "all_cohort" if cohort_mode == "All cohort (incl. frozen)" else "raise_recipients"
 
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
@@ -2875,7 +2897,7 @@ def view_individual(data: dict):
         # Apples-to-apples with the personal arithmetic mean over the same
         # year transitions.
         co_avg = _company_avg_raise_pct(
-            data.get("cohort_raises", {}), fy, ly, compare_against
+            data.get("cohort_raises", {}), fy, ly, compare_against, cut_key
         )
         you_avg = _personal_avg_raise_pct(rec, fy, ly)
         avg_card_label = (
@@ -3066,8 +3088,9 @@ def view_individual(data: dict):
                 "$ change: $%{customdata[0]:,}<extra>You</extra>"
             ),
         ))
-        # Company-avg overlay on the SAME % axis. Reads raise_recipients (not
-        # all_cohort) so frozen-employee zeroes don't drag the benchmark.
+        # Company-avg overlay on the SAME % axis. PL-085: reads cut_key so the
+        # line moves in lockstep with the metric card when the user toggles
+        # between all_cohort and raise_recipients.
         chart_cohort_raises = data.get("cohort_raises", {})
         co_pcts = []
         for y in yy:
@@ -3075,7 +3098,7 @@ def view_individual(data: dict):
             if compare_against and slice_data:
                 slice_data = slice_data.get("by_site", {}).get(compare_against)
             co_pcts.append(
-                slice_data["raise_recipients"]["mean_pct"] if slice_data else None
+                slice_data[cut_key]["mean_pct"] if slice_data else None
             )
         co_label = f"{compare_against} avg" if compare_against else "Company avg"
         # PL-084: line points show their % values inline (was hover-only) so
