@@ -3325,9 +3325,13 @@ def view_comparison(data: dict):
         unsafe_allow_html=True,
     )
 
-    # PL-075: surface any cap warning parked by Find by Raise Window's multi-select
-    # redirect. pop() so the warning fires once and clears.
-    cap_warning = st.session_state.pop("_lbw_cap_warning", None)
+    # PL-075 / PL-092: surface any cap warning parked by a Leaderboard tab's
+    # multi-select redirect (Find by Raise Window → _lbw_cap_warning;
+    # Top Performers → _lb_cap_warning). pop() both so neither lingers stale;
+    # the warning fires once and clears.
+    lbw_warn = st.session_state.pop("_lbw_cap_warning", None)
+    lb_warn = st.session_state.pop("_lb_cap_warning", None)
+    cap_warning = lbw_warn or lb_warn
     if cap_warning:
         st.warning(cap_warning)
 
@@ -4139,7 +4143,9 @@ def _view_leaderboard_top_performers(data: dict):
 
     # Full table
     st.markdown("#### Full leaderboard")
-    st.caption("Click a row to open that person's Individual Profile.")
+    st.caption(
+        "Select rows below, then click 'View selected' to open profile or comparison."
+    )
     table_rows = []
     for d in ranked:
         table_rows.append({
@@ -4198,19 +4204,53 @@ def _view_leaderboard_top_performers(data: dict):
         },
         height=440,
         on_select="rerun",
-        selection_mode="single-row",
+        selection_mode="multi-row",
         key="lb_table",
     )
-    sel_rows = event.selection.rows
-    if sel_rows and 0 <= sel_rows[0] < len(df):
-        selected_name = df.iloc[sel_rows[0]]["Name"]
-        st.session_state["_nav_redirect"] = "Individual profile"
-        st.session_state["ind_person"] = selected_name
-        # Clear the dataframe's stored selection so returning to this tab later
-        # doesn't auto-fire the redirect on the same stale selection.
-        if "lb_table" in st.session_state:
-            del st.session_state["lb_table"]
-        st.rerun()
+    # PL-092: on_select="rerun" stays so the count below updates live as boxes
+    # are toggled. Routing only runs from the explicit "View selected" button so
+    # selecting a single row doesn't immediately yank the user to a new view
+    # (the auto-fire UX that surfaced in S5 smoke). Mirrors the Find by Raise
+    # Window pattern (PL-075).
+    sel_rows = list(event.selection.rows) if event and event.selection else []
+    n_selected = len(sel_rows)
+    if n_selected == 0:
+        st.caption("Select 1 row to view profile, or 2-6 to compare.")
+    else:
+        col_count, col_btn = st.columns([3, 1])
+        with col_count:
+            destination = (
+                "→ Individual Profile" if n_selected == 1
+                else "→ Comparison view"
+            )
+            cap_note = " (capped at 6 by rank)" if n_selected > 6 else ""
+            st.caption(f"**{n_selected}** selected · {destination}{cap_note}")
+        with col_btn:
+            if st.button("View selected", key="lb_view_btn", type="primary"):
+                selected_names = [
+                    df.iloc[i]["Name"] for i in sel_rows
+                    if 0 <= i < len(df)
+                ]
+                if len(selected_names) == 1:
+                    # Single row → Individual Profile (PL-027 behavior preserved)
+                    st.session_state["_nav_redirect"] = "Individual profile"
+                    st.session_state["ind_person"] = selected_names[0]
+                elif len(selected_names) >= 2:
+                    # Multi-row → Comparison view, capped at 6 (rows are sorted
+                    # by rank, so the cap takes the top performers).
+                    capped = selected_names[:6]
+                    st.session_state["_nav_redirect"] = "Comparison"
+                    st.session_state["cmp_sel"] = capped
+                    if len(selected_names) > 6:
+                        st.session_state["_lb_cap_warning"] = (
+                            f"Selected {len(selected_names)} people; "
+                            f"Comparison capped at 6 — showing top 6 by rank."
+                        )
+                # Clear the dataframe's stored selection so returning to this
+                # tab later starts fresh.
+                if "lb_table" in st.session_state:
+                    del st.session_state["lb_table"]
+                st.rerun()
 
 
 def _view_leaderboard_raise_window(data: dict):
