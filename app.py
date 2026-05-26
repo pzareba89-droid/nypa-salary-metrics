@@ -3212,6 +3212,129 @@ def view_individual(data: dict):
         tl_html += "</div>"
         st.markdown(tl_html, unsafe_allow_html=True)
 
+    # ------------------------------------------------------------------
+    # PL-089: Chart B — "Your compounding gap" (the raise-meeting closer).
+    # Full-width below the two-column You-vs-Benchmark + career-timeline row.
+    # Reuses cut_key (PL-085 cohort toggle) and compare_against (PL-077 site
+    # dropdown) — no new state. Whole-tenure scope (full rec years, not the
+    # page year-range filter) since the cumulative-shortfall story is a
+    # full-career story.
+    # ------------------------------------------------------------------
+    st.markdown("### Your compounding gap")
+
+    cg_years = rec.get("years", [])
+    cg_base = rec.get("base", [])
+    cg_cohort = data.get("cohort_raises", {})
+
+    if len(cg_years) < 2 or len(cg_base) < 2:
+        st.info("Not enough years to compute a compounding gap (need 2+ years).")
+    else:
+        # Data-quality warning: duplicate years are the name-collision tell
+        # (PL-091 scope — 17 affected records). Surface before the chart so the
+        # reader has context if they land on one of those names.
+        if len(cg_years) != len(set(cg_years)):
+            st.warning(
+                "This record contains duplicate years, suggesting it may "
+                "conflate two different employees with the same name. The "
+                "compounding gap below may not reflect a single coherent "
+                "career. (See PL-091 in the punch list for the planned data "
+                "pipeline fix.)"
+            )
+
+        # Shadow trajectory: start at first-year base, compound the org-wide
+        # (or selected-site) avg raise % per year. Iterate cohort_raises
+        # directly per-year — _company_avg_raise_pct returns a RANGE MEAN, not
+        # per-year values (S5 retro flag), so it must not be used here.
+        shadow = [cg_base[0]]
+        gap_per_year = [0.0]  # year 0 has no gap by construction
+        for i in range(1, len(cg_years)):
+            y_from, y_to = cg_years[i - 1], cg_years[i]
+            pct = None
+            if y_to == y_from + 1:
+                slice_data = cg_cohort.get(f"{y_from}_{y_to}")
+                if slice_data:
+                    if compare_against:
+                        site_slice = slice_data.get("by_site", {}).get(compare_against)
+                        src = site_slice if site_slice else slice_data
+                    else:
+                        src = slice_data
+                    pct = src[cut_key]["mean_pct"] / 100.0
+            # Non-consecutive year-pair or missing slice → no compounding this
+            # step; carry the shadow flat so the gap doesn't accumulate.
+            shadow.append(shadow[-1] if pct is None else shadow[-1] * (1.0 + pct))
+            gap_per_year.append(shadow[-1] - cg_base[i])
+
+        trailing_gap = shadow[-1] - cg_base[-1]
+        cumulative_shortfall = sum(gap_per_year)
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            tg_value = (
+                f"${trailing_gap:,.0f}" if trailing_gap > 0
+                else f"+${abs(trailing_gap):,.0f}"
+            )
+            metric_card(
+                f"Trailing salary ({cg_years[-1]})", tg_value,
+                sub="behind shadow" if trailing_gap > 0 else "ahead of shadow",
+                color="coral" if trailing_gap > 0 else "teal",
+            )
+        with col_b:
+            cs_value = (
+                f"${cumulative_shortfall:,.0f}" if cumulative_shortfall > 0
+                else f"+${abs(cumulative_shortfall):,.0f}"
+            )
+            metric_card(
+                f"Cumulative shortfall ({cg_years[0]}–{cg_years[-1]})", cs_value,
+                sub="sum of yearly gaps" if cumulative_shortfall > 0 else "sum of yearly leads",
+                color="coral" if cumulative_shortfall > 0 else "teal",
+            )
+
+        shadow_label = (
+            f"Shadow ({compare_against} avg)" if compare_against
+            else "Shadow (org avg)"
+        )
+        cg_customdata = [
+            [cg_base[i], shadow[i], gap_per_year[i]] for i in range(len(cg_years))
+        ]
+        fig = go.Figure()
+        # Actual salary (solid blue) added first so the shadow's fill="tonexty"
+        # shades the band down to this trace.
+        fig.add_trace(go.Scatter(
+            x=cg_years, y=cg_base, name="Actual",
+            mode="lines+markers",
+            line=dict(color=BLUE, width=2.5), marker=dict(color=BLUE, size=7),
+            customdata=cg_customdata,
+            hovertemplate=(
+                "<b>%{x}</b><br>Actual: $%{customdata[0]:,.0f}<br>"
+                "Shadow: $%{customdata[1]:,.0f}<br>"
+                "Gap: $%{customdata[2]:,.0f}<extra>Actual</extra>"
+            ),
+        ))
+        # Shadow trajectory (dashed amber) with the gap band filled between.
+        fig.add_trace(go.Scatter(
+            x=cg_years, y=shadow, name=shadow_label,
+            mode="lines+markers",
+            line=dict(color=AMBER, width=2.5, dash="dash"),
+            marker=dict(color=AMBER, size=7),
+            fill="tonexty", fillcolor=rgba(AMBER, 0.15),
+            customdata=cg_customdata,
+            hovertemplate=(
+                "<b>%{x}</b><br>Shadow: $%{customdata[1]:,.0f}<br>"
+                "Actual: $%{customdata[0]:,.0f}<br>"
+                "Gap: $%{customdata[2]:,.0f}<extra>%{fullData.name}</extra>"
+            ),
+        ))
+        apply_layout(fig, height=320, show_legend=True, y_dollars=True)
+        fig.update_yaxes(title="Base salary")
+        chart_card("Your compounding gap — actual vs shadow", fig,
+                   key="ind-compounding-gap")
+        st.caption(
+            "Shadow assumes you matched the org-wide average raise % each year "
+            "(merit + promotions bundled). If you got fewer promotions than "
+            "typical, the gap above reflects that bundled comparison — your "
+            "pure-merit-only gap may be smaller."
+        )
+
     # Year-by-year table
     st.markdown("#### Year by year detail")
     rows = []
