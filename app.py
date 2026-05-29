@@ -2712,6 +2712,9 @@ def _company_avg_raise_pct(
     # "raise_recipients" (default, excludes $0/frozen) or "all_cohort"
     # (includes frozen). Default preserves PL-077 baseline behavior.
     # compare_filter empty -> org-wide; otherwise the by_site slice.
+    # PL-094: cut_key can now also be one of the title_change_* /
+    # merit_only_* keys; .get() guards against sub-buckets that fell
+    # below MIN_SLICE_N=5 in the pre-compute pipeline.
     pcts = []
     for y in range(start_y, end_y):
         slice_data = cohort_raises.get(f"{y}_{y + 1}")
@@ -2721,7 +2724,10 @@ def _company_avg_raise_pct(
             slice_data = slice_data.get("by_site", {}).get(compare_filter)
             if not slice_data:
                 continue
-        pcts.append(slice_data[cut_key]["mean_pct"])
+        bucket = slice_data.get(cut_key)
+        if not bucket:
+            continue
+        pcts.append(bucket["mean_pct"])
     if not pcts:
         return None
     return sum(pcts) / len(pcts)
@@ -2856,7 +2862,12 @@ def view_individual(data: dict):
     # org_cohort_mode toggle. Drives metric card, chart line, and verdict block
     # in lockstep. Default "Raise recipients only" preserves PL-077/PL-084
     # baseline math.
-    col_cmp, col_cut, _col_pad = st.columns([2, 2, 2])
+    # PL-094: adds a third radio — Raise type — that composes with the
+    # cohort cut to pick among 6 pre-computed sub-buckets. Default
+    # "All raises" preserves PL-085 behavior. cut_key (no raise-type
+    # prefix) is kept for PL-089's compounding-gap chart, which is
+    # explicitly out of scope for this ticket.
+    col_cmp, col_cut, col_rt = st.columns([2, 2, 2.4])
     with col_cmp:
         compare_against = st.selectbox(
             "Compare against",
@@ -2877,7 +2888,40 @@ def view_individual(data: dict):
                 "Same toggle as Org Overview."
             ),
         )
+    with col_rt:
+        raise_type = st.radio(
+            "Raise type",
+            ["All raises", "Title-change years only", "Same-title years only"],
+            horizontal=True,
+            index=0,
+            key="ind_raise_type",
+            help=(
+                "All raises: every recorded year-over-year change "
+                "(default; matches current app). "
+                "Title-change years only: year-pairs where the person's "
+                "title changed AND raise >= 4% (approximates promotions). "
+                "Same-title years only: year-pairs where the title stayed "
+                "the same OR title-change raise was below 4% (approximates "
+                "pure merit). The 4% threshold filters out title-cleanup "
+                "noise — see PL-094 spec."
+            ),
+        )
     cut_key = "all_cohort" if cohort_mode == "All cohort (incl. frozen)" else "raise_recipients"
+    # PL-094: 6-case map (raise_type x cohort_mode) -> bucket key.
+    _rt_prefix = {
+        "All raises": "",
+        "Title-change years only": "title_change_",
+        "Same-title years only": "merit_only_",
+    }[raise_type]
+    _rt_suffix = "all" if cohort_mode == "All cohort (incl. frozen)" else "recipients"
+    cut_key_rt = {
+        ("", "all"): "all_cohort",
+        ("", "recipients"): "raise_recipients",
+        ("title_change_", "all"): "title_change_all",
+        ("title_change_", "recipients"): "title_change_recipients",
+        ("merit_only_", "all"): "merit_only_all",
+        ("merit_only_", "recipients"): "merit_only_recipients",
+    }[(_rt_prefix, _rt_suffix)]
 
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
@@ -2911,9 +2955,11 @@ def view_individual(data: dict):
         # PL-077 (amend): arithmetic mean of raise_recipients raises across
         # the selected year range, scoped by the Compare-against dropdown.
         # Apples-to-apples with the personal arithmetic mean over the same
-        # year transitions.
+        # year transitions. PL-094: uses cut_key_rt so the card moves in
+        # lockstep with the new Raise-type radio (and stays in lockstep
+        # with the amber chart line + verdict block below).
         co_avg = _company_avg_raise_pct(
-            data.get("cohort_raises", {}), fy, ly, compare_against, cut_key
+            data.get("cohort_raises", {}), fy, ly, compare_against, cut_key_rt
         )
         you_avg = _personal_avg_raise_pct(rec, fy, ly)
         avg_card_label = (
@@ -3106,15 +3152,26 @@ def view_individual(data: dict):
         ))
         # Company-avg overlay on the SAME % axis. PL-085: reads cut_key so the
         # line moves in lockstep with the metric card when the user toggles
-        # between all_cohort and raise_recipients.
+        # between all_cohort and raise_recipients. PL-094: uses cut_key_rt
+        # (composed from raise_type x cohort_mode) and .get()-guards the
+        # bucket lookup so years whose sub-bucket fell below MIN_SLICE_N=5
+        # carry flat (None breaks the line at that point — connectgaps=False).
         chart_cohort_raises = data.get("cohort_raises", {})
         co_pcts = []
         for y in yy:
             slice_data = chart_cohort_raises.get(f"{y - 1}_{y}")
             if compare_against and slice_data:
                 slice_data = slice_data.get("by_site", {}).get(compare_against)
-            co_pcts.append(
-                slice_data[cut_key]["mean_pct"] if slice_data else None
+            bucket = slice_data.get(cut_key_rt) if slice_data else None
+            co_pcts.append(bucket["mean_pct"] if bucket else None)
+        # PL-094: surface the n-too-small case once when the user lands on
+        # a slice + raise-type combo with no data anywhere in the visible
+        # year range. The chart still renders (carry-flat); the info banner
+        # tells the user how to broaden the selection.
+        if raise_type != "All raises" and not any(v is not None for v in co_pcts):
+            st.info(
+                "n too small for this slice + raise type combination; "
+                "try 'All raises' or a broader filter."
             )
         co_label = f"{compare_against} avg" if compare_against else "Company avg"
         # PL-084: line points show their % values inline (was hover-only) so
@@ -3146,8 +3203,14 @@ def view_individual(data: dict):
                         # PL-087: read cut_key so the verdict benchmark matches
                         # the chart's amber line (was hard-coded all_cohort,
                         # which mismatched the raise_recipients chart line).
-                        ctx = (y_ctx, person_pct, trans[cut_key]["mean_pct"])
-                        break
+                        # PL-094: now reads cut_key_rt so the verdict block
+                        # stays in lockstep with the new Raise-type radio.
+                        # .get()-guard so a too-small sub-bucket walks back
+                        # to the next-most-recent year that does have data.
+                        bucket = trans.get(cut_key_rt)
+                        if bucket:
+                            ctx = (y_ctx, person_pct, bucket["mean_pct"])
+                            break
         if ctx:
             y_ctx, person_pct, org_pct = ctx
             diff = person_pct - org_pct
