@@ -4757,6 +4757,47 @@ def view_org(data: dict):
                 sub="No prior year for comparison", color="coral",
             )
 
+    # PL-094: single shared raise-type radio that drives BOTH Chart A
+    # (Merit Budget vs Reality) AND the YoY history chart below. Each chart
+    # keeps its own cohort cut (org_merit_chart_mode / org_cohort_mode);
+    # raise-type is a new shared dimension that composes with both per the
+    # 6-case map. Distinct session-state key from Individual Profile's
+    # 'ind_raise_type' so the two views are independent.
+    org_cohort_raises_top = data.get("cohort_raises", {})
+    if org_cohort_raises_top:
+        org_raise_type = st.radio(
+            "Raise type",
+            ["All raises", "Title-change years only", "Same-title years only"],
+            horizontal=True,
+            index=0,
+            key="org_raise_type",
+            help=(
+                "All raises: every recorded year-over-year change "
+                "(default; matches current app). "
+                "Title-change years only: year-pairs where the person's "
+                "title changed AND raise >= 4% (approximates promotions). "
+                "Same-title years only: year-pairs where the title stayed "
+                "the same OR title-change raise was below 4% (approximates "
+                "pure merit). The 4% threshold filters out title-cleanup "
+                "noise — see PL-094 spec."
+            ),
+        )
+    else:
+        org_raise_type = "All raises"
+    _org_rt_prefix = {
+        "All raises": "",
+        "Title-change years only": "title_change_",
+        "Same-title years only": "merit_only_",
+    }[org_raise_type]
+    _ORG_RT_MAP = {
+        ("", "all"): "all_cohort",
+        ("", "recipients"): "raise_recipients",
+        ("title_change_", "all"): "title_change_all",
+        ("title_change_", "recipients"): "title_change_recipients",
+        ("merit_only_", "all"): "merit_only_all",
+        ("merit_only_", "recipients"): "merit_only_recipients",
+    }
+
     # PL-088: "Merit Budget vs Reality" hero chart for the raise-meeting case.
     # Three site lines (Org / White Plains / St. Lawrence) vs a stated merit
     # budget band. Sits above the existing YoY history. Default cohort cut is
@@ -4802,6 +4843,13 @@ def view_org(data: dict):
             ),
         )
         merit_cut = "all_cohort" if merit_mode == "All cohort (incl. frozen)" else "raise_recipients"
+        # PL-094: compose merit_cut with the page-level org_raise_type radio
+        # so Chart A reacts to BOTH cohort cut AND raise type. Default
+        # (raise_type='All raises') resolves merit_cut_rt == merit_cut, so
+        # no regression vs PL-088. .get() guards sub-buckets that fell
+        # below MIN_SLICE_N=5 (or are absent at the slice level).
+        _merit_suffix = "all" if merit_mode == "All cohort (incl. frozen)" else "recipients"
+        merit_cut_rt = _ORG_RT_MAP[(_org_rt_prefix, _merit_suffix)]
 
         merit_transitions = sorted(merit_cohort_data.keys())
         x_labels = []
@@ -4809,16 +4857,18 @@ def view_org(data: dict):
         org_n, wp_n, sl_n = [], [], []
         for t in merit_transitions:
             c = merit_cohort_data[t]
-            cut_data = c[merit_cut]
+            cut_data = c.get(merit_cut_rt)
             x_labels.append(f"{c['year_from']}→{str(c['year_to'])[-2:]}")
-            org_means.append(cut_data["mean_pct"])
-            org_n.append(cut_data["n"])
+            org_means.append(cut_data["mean_pct"] if cut_data else None)
+            org_n.append(cut_data["n"] if cut_data else 0)
             wp_slice = c.get("by_site", {}).get("White Plains")
             sl_slice = c.get("by_site", {}).get("St. Lawrence")
-            wp_means.append(wp_slice[merit_cut]["mean_pct"] if wp_slice else None)
-            wp_n.append(wp_slice[merit_cut]["n"] if wp_slice else 0)
-            sl_means.append(sl_slice[merit_cut]["mean_pct"] if sl_slice else None)
-            sl_n.append(sl_slice[merit_cut]["n"] if sl_slice else 0)
+            wp_cut = wp_slice.get(merit_cut_rt) if wp_slice else None
+            sl_cut = sl_slice.get(merit_cut_rt) if sl_slice else None
+            wp_means.append(wp_cut["mean_pct"] if wp_cut else None)
+            wp_n.append(wp_cut["n"] if wp_cut else 0)
+            sl_means.append(sl_cut["mean_pct"] if sl_cut else None)
+            sl_n.append(sl_cut["n"] if sl_cut else 0)
 
         merit_hover = (
             "<b>%{x}</b><br>%{y:.2f}%<br>n=%{customdata[0]:,}"
@@ -4890,6 +4940,13 @@ def view_org(data: dict):
             ),
         )
         cut_key = "all_cohort" if cohort_mode == "All cohort (incl. frozen)" else "raise_recipients"
+        # PL-094: compose cut_key with the page-level org_raise_type radio.
+        # Default (raise_type='All raises') resolves cut_key_rt == cut_key,
+        # so no regression vs PL-073. Per-year missing buckets get skipped
+        # (drop the transition rather than carry flat — preserves the
+        # existing "if not c: continue" pattern).
+        _cohort_suffix = "all" if cohort_mode == "All cohort (incl. frozen)" else "recipients"
+        cut_key_rt = _ORG_RT_MAP[(_org_rt_prefix, _cohort_suffix)]
         transitions = sorted(cohort_data.keys())
         # PL-073: pick slice matching active filter for each transition; mirrors the
         # elif chain c6 uses so the chart and card stay in lockstep with the filter.
@@ -4907,7 +4964,9 @@ def view_org(data: dict):
                 c = c_org
             if not c:
                 continue
-            cut = c[cut_key]
+            cut = c.get(cut_key_rt)
+            if not cut:
+                continue
             x_labels.append(f"{c_org['year_from']}→{str(c_org['year_to'])[-2:]}")
             means.append(cut["mean_pct"])
             medians.append(cut["median_pct"])
@@ -4918,8 +4977,13 @@ def view_org(data: dict):
                 c["raise_recipients"]["pct_of_cohort"],
             ])
         if not x_labels:
+            # PL-094: empty state now covers two causes — filter slice
+            # absent (PL-073) or raise-type sub-bucket below MIN_SLICE_N
+            # (PL-094). Surface both so the user knows how to recover.
+            scope_label = f"'{chart_filter}'" if chart_filter else "the selected raise type"
             st.info(
-                f"No raise history available for '{chart_filter}' across recorded years."
+                f"No raise history available for {scope_label} across "
+                "recorded years. Try 'All raises' or a broader filter."
             )
         else:
             hover_tpl = (
